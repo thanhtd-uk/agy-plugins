@@ -4,7 +4,7 @@ Monorepo tập trung mã nguồn các plugin tùy biến cho Google Antigravity.
 
 ## Danh sách Plugin
 
-- **[`plugins/codex-bridge/`](plugins/codex-bridge/README.md)** — Local Stdio MCP Server (Node.js >= 20, zero external runtime dependencies) kết nối Antigravity Orchestrator với Codex CLI cục bộ (`codex exec`, `codex exec resume`, `codex exec review`).
+- **[`plugins/codex-bridge/`](plugins/codex-bridge/README.md)** — Local Stdio MCP Server (Node.js >= 20, zero external runtime dependencies) kết nối Antigravity Orchestrator với Codex CLI cục bộ (`codex exec`, `codex exec resume`, `codex exec review`) · [Interactive Infographic](https://thanhtd-uk.github.io/agy-plugins/plugins/codex-bridge/docs/codex-bridge-infographic.html).
 
 ## Cài đặt nhanh trên máy mới (Quick Start)
 

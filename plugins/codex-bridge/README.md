@@ -4,7 +4,7 @@ Zero-dependency Local Stdio MCP Server (Node.js >= 20, pure ESM) pairing **Antig
 
 ![codex-bridge v0.2.1 architecture](docs/codex-bridge-infographic.png)
 
-> Interactive HTML version (offline, mode explorer + 1-click 1920×1080 PNG export): [`docs/codex-bridge-infographic.html`](docs/codex-bridge-infographic.html)
+> **Live Interactive UI:** [Mở Infographic tương tác trên GitHub Pages](https://thanhtd-uk.github.io/agy-plugins/plugins/codex-bridge/docs/codex-bridge-infographic.html) *(hỗ trợ chuyển chế độ & xuất PNG 1920×1080; hoặc mở file offline [`docs/codex-bridge-infographic.html`](docs/codex-bridge-infographic.html))*
 
 ## Features
 
