@@ -7,6 +7,7 @@ import {
   STDERR_TAIL_MAX_CHARS,
   isTestMode,
   resolveGitBinary,
+  resolvePowershellBinary,
   resolveTaskkillBinary,
 } from './config.mjs';
 import { composeCustomTargetReviewPrompt, composeExecPrompt } from './handoff.mjs';
@@ -251,8 +252,132 @@ export function summarizeWorktree(worktreePath, env = process.env) {
   };
 }
 
+/** Classifies whether a taskkill failure strictly indicates the target root PID no longer exists. */
+export function isTaskkillRootNotFoundError(err, stdout, stderr, pid) {
+  if (!err || err.killed || err.signal || typeof err.code === 'string') {
+    return false;
+  }
+  if (String(stdout || '').trim() !== '') {
+    return false;
+  }
+  if (typeof err.code === 'number') {
+    return err.code === 128;
+  }
+  if (err.code !== undefined) {
+    return false;
+  }
+  const escapedPid = String(pid).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const notFoundRe = new RegExp(
+    `^\\s*ERROR:\\s+The\\s+process\\s+"?${escapedPid}"?\\s+not\\s+found\\.?\\s*$`,
+    'i'
+  );
+  return notFoundRe.test(String(stderr || ''));
+}
+
+/** Queries live direct Windows descendant PIDs via trusted System32 powershell.exe. */
+export function findWindowsDescendants(pid, options = {}) {
+  const {
+    env = process.env,
+    timeoutMs = 2500,
+    spawnedAtMs = null,
+    execFileFn = execFile,
+    powershellBin,
+  } = options;
+
+  const numericPid = Number(pid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0) {
+    return Promise.resolve({ ok: true, pids: [] });
+  }
+
+  const psBin = powershellBin !== undefined ? powershellBin : resolvePowershellBinary(env);
+  if (!psBin) {
+    return Promise.resolve({
+      ok: false,
+      pids: [],
+      error: 'System32 powershell.exe not found',
+    });
+  }
+
+  const script = `Get-CimInstance Win32_Process -Filter "ParentProcessId=${numericPid}" -Property ProcessId,CreationDate | ForEach-Object { "$($_.ProcessId),$(if($_.CreationDate){([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds()}else{0})" }`;
+  return new Promise((resolve) => {
+    execFileFn(
+      psBin,
+      ['-NoProfile', '-NonInteractive', '-Command', script],
+      { windowsHide: true, timeout: Math.max(timeoutMs, 2500), encoding: 'utf8' },
+      (err, stdout, stderr) => {
+        if (err) {
+          const detail = `${stderr || ''} ${stdout || ''} ${err.message || ''}`.trim();
+          resolve({
+            ok: false,
+            pids: [],
+            error: detail || 'Failed to query Windows descendant processes',
+          });
+          return;
+        }
+        const pids = [];
+        const seen = new Set();
+        for (const rawLine of String(stdout || '').split(/\r?\n/)) {
+          const line = rawLine.trim();
+          if (!line) continue;
+          const [pidPart, createdPart] = line.split(',');
+          const childPid = Number(pidPart);
+          if (!Number.isInteger(childPid) || childPid <= 0 || childPid === numericPid) {
+            continue;
+          }
+          const creationMs = Number(createdPart);
+          if (
+            typeof spawnedAtMs === 'number' &&
+            Number.isFinite(spawnedAtMs) &&
+            Number.isFinite(creationMs) &&
+            creationMs > 0 &&
+            creationMs < spawnedAtMs - 2000
+          ) {
+            continue;
+          }
+          if (!seen.has(childPid)) {
+            seen.add(childPid);
+            pids.push(childPid);
+          }
+        }
+        resolve({ ok: true, pids });
+      }
+    );
+  });
+}
+
+function runTaskkillSingle(killer, targetPid, timeoutMs, execFileFn, isProcessGone) {
+  return new Promise((resolve) => {
+    execFileFn(
+      killer,
+      ['/T', '/F', '/PID', String(targetPid)],
+      { windowsHide: true, timeout: timeoutMs, encoding: 'utf8' },
+      (err, stdout, stderr) => {
+        if (!err) {
+          resolve({ ok: true, rootNotFound: false, method: 'taskkill' });
+          return;
+        }
+        const detail = `${stderr || ''} ${stdout || ''} ${err.message || ''}`.trim();
+        if (
+          isTaskkillRootNotFoundError(err, stdout, stderr, targetPid) &&
+          isProcessGone(targetPid)
+        ) {
+          resolve({ ok: true, rootNotFound: true, method: 'taskkill-already-exited' });
+          return;
+        }
+        resolve({
+          ok: false,
+          rootNotFound: false,
+          method: 'taskkill',
+          timedOut: Boolean(err.killed || err.signal),
+          error: detail || 'taskkill failed',
+        });
+      }
+    );
+  });
+}
+
 /** Terminates a child process and its descendant tree cleanly on Windows/POSIX. */
-export function killProcessTree(pid, options = {}) {
+export async function killProcessTree(pid, options = {}) {
   const {
     timeoutMs = 5000,
     env = process.env,
@@ -260,60 +385,123 @@ export function killProcessTree(pid, options = {}) {
     killFn = process.kill,
     platform = process.platform,
     taskkillBin,
+    powershellBin,
     processGroup = platform !== 'win32',
+    spawnedAtMs = null,
+    rootAlreadyExited = false,
+    findDescendantsFn,
   } = options;
 
-  return new Promise((resolve) => {
-    if (!pid) {
-      resolve({ ok: true, method: 'noop' });
-      return;
+  if (!pid) {
+    return { ok: true, method: 'noop' };
+  }
+
+  const isProcessGone = (targetPid) => {
+    try {
+      killFn(targetPid, 0);
+      return false;
+    } catch (err) {
+      return err?.code === 'ESRCH';
+    }
+  };
+
+  if (platform === 'win32') {
+    const killer = taskkillBin !== undefined ? taskkillBin : resolveTaskkillBinary(env);
+    if (!killer) {
+      return {
+        ok: false,
+        method: 'taskkill',
+        timedOut: false,
+        error: 'System32 taskkill.exe not found',
+      };
     }
 
-    const isProcessGone = (targetPid) => {
-      try {
-        killFn(targetPid, 0);
-        return false;
-      } catch (err) {
-        return err?.code === 'ESRCH';
+    const cleanupDescendants = async () => {
+      let lookupRes;
+      if (typeof findDescendantsFn === 'function') {
+        const raw = await findDescendantsFn(pid, { spawnedAtMs, timeoutMs, env });
+        lookupRes = Array.isArray(raw) ? { ok: true, pids: raw } : raw;
+      } else if (execFileFn === execFile) {
+        lookupRes = await findWindowsDescendants(pid, {
+          env,
+          timeoutMs: Math.max(timeoutMs, 2500),
+          spawnedAtMs,
+          powershellBin,
+        });
+      } else if (rootAlreadyExited) {
+        return {
+          ok: false,
+          method: 'taskkill-descendants',
+          timedOut: false,
+          error: 'Unable to verify descendant processes after root exit',
+        };
+      } else {
+        return { ok: true, method: 'taskkill-already-exited' };
       }
+
+      if (!lookupRes || lookupRes.ok === false) {
+        return {
+          ok: false,
+          method: 'taskkill-descendants',
+          timedOut: false,
+          error: lookupRes?.error || 'Failed to inspect descendant processes',
+        };
+      }
+
+      const childPids = Array.isArray(lookupRes.pids) ? lookupRes.pids : [];
+      if (childPids.length === 0) {
+        return {
+          ok: true,
+          method: rootAlreadyExited ? 'already-exited' : 'taskkill-already-exited',
+        };
+      }
+
+      const failures = [];
+      let anyTimedOut = false;
+      for (const childPid of childPids) {
+        const childRes = await runTaskkillSingle(
+          killer,
+          childPid,
+          timeoutMs,
+          execFileFn,
+          isProcessGone
+        );
+        if (!childRes.ok) {
+          anyTimedOut = anyTimedOut || Boolean(childRes.timedOut);
+          failures.push(`pid ${childPid}: ${childRes.error || 'taskkill failed'}`);
+        }
+      }
+      if (failures.length > 0) {
+        return {
+          ok: false,
+          method: 'taskkill-descendants',
+          timedOut: anyTimedOut,
+          error: failures.join('; '),
+        };
+      }
+      return { ok: true, method: 'taskkill-descendants' };
     };
 
-    if (platform === 'win32') {
-      const killer = taskkillBin !== undefined ? taskkillBin : resolveTaskkillBinary(env);
-      if (!killer) {
-        resolve({
-          ok: false,
-          method: 'taskkill',
-          timedOut: false,
-          error: 'System32 taskkill.exe not found',
-        });
-        return;
-      }
-      execFileFn(
-        killer,
-        ['/T', '/F', '/PID', String(pid)],
-        { windowsHide: true, timeout: timeoutMs, encoding: 'utf8' },
-        (err, stdout, stderr) => {
-          if (!err) {
-            resolve({ ok: true, method: 'taskkill' });
-            return;
-          }
-          const detail = `${stderr || ''} ${stdout || ''} ${err.message || ''}`.trim();
-          if (isProcessGone(pid)) {
-            resolve({ ok: true, method: 'taskkill-already-exited' });
-            return;
-          }
-          resolve({
-            ok: false,
-            method: 'taskkill',
-            timedOut: Boolean(err.killed),
-            error: detail || 'taskkill failed',
-          });
-        }
-      );
-      return;
+    if (rootAlreadyExited) {
+      return cleanupDescendants();
     }
 
+    const rootRes = await runTaskkillSingle(killer, pid, timeoutMs, execFileFn, isProcessGone);
+    if (!rootRes.ok) {
+      return {
+        ok: false,
+        method: rootRes.method,
+        timedOut: rootRes.timedOut,
+        error: rootRes.error,
+      };
+    }
+    if (!rootRes.rootNotFound) {
+      return { ok: true, method: 'taskkill' };
+    }
+    return cleanupDescendants();
+  }
+
+  return new Promise((resolve) => {
     const targetPid = processGroup ? -pid : pid;
     try {
       killFn(targetPid, 'SIGTERM');
@@ -351,7 +539,14 @@ function appendStderrTail(current, chunk) {
 }
 
 /** Spawns a Codex CLI invocation, streams JSONL progress, and collects output via -o tmpfile. */
-export function startCodexRun({ binPath, prefixArgs = [], spec, onProgress, env = process.env }) {
+export function startCodexRun({
+  binPath,
+  prefixArgs = [],
+  spec,
+  onProgress,
+  env = process.env,
+  killProcessTreeFn = killProcessTree,
+}) {
   const tmpOutputPath = path.join(os.tmpdir(), `codex-bridge-${crypto.randomUUID()}.txt`);
   const beforeWorktrees = spec.mode === 'worktree' ? listGitWorktrees(spec.cwd, env) : null;
   const { args, stdinPrompt, usedExecFallback } = buildCodexInvocation(spec, tmpOutputPath);
@@ -373,6 +568,7 @@ export function startCodexRun({ binPath, prefixArgs = [], spec, onProgress, env 
   let spawnError = null;
 
   const isPosix = process.platform !== 'win32';
+  const spawnedAtMs = Date.now();
   const child = spawn(binPath, [...prefixArgs, ...args], {
     cwd: spec.cwd,
     shell: false,
@@ -418,6 +614,9 @@ export function startCodexRun({ binPath, prefixArgs = [], spec, onProgress, env 
   });
 
   let childExited = false;
+  let pipesClosed = false;
+  let lastCancelFailedResult = null;
+  let inFlightCancelPromise = null;
   const donePromise = new Promise((resolve) => {
     let finalized = false;
     let exitGraceTimer = null;
@@ -520,6 +719,7 @@ export function startCodexRun({ binPath, prefixArgs = [], spec, onProgress, env 
 
     child.on('error', (err) => {
       childExited = true;
+      pipesClosed = true;
       spawnError = err;
       finalize(null, null);
     });
@@ -541,14 +741,82 @@ export function startCodexRun({ binPath, prefixArgs = [], spec, onProgress, env 
 
     child.on('close', (code, signal) => {
       childExited = true;
+      pipesClosed = true;
       finalize(code, signal);
     });
   });
+
+  const performCancel = async () => {
+    const killTimeoutMs = isTestMode(env) ? 300 : 4000;
+    if (!childExited) {
+      const res = await killProcessTreeFn(child.pid, {
+        env,
+        timeoutMs: killTimeoutMs,
+        spawnedAtMs,
+      });
+      if (res?.ok === false) {
+        lastCancelFailedResult = res;
+      } else if (res?.ok) {
+        lastCancelFailedResult = null;
+      }
+      return res;
+    }
+
+    if (lastCancelFailedResult) {
+      if (isPosix) {
+        const res = await killProcessTreeFn(child.pid, {
+          env,
+          timeoutMs: killTimeoutMs,
+          spawnedAtMs,
+        });
+        if (res?.ok) {
+          lastCancelFailedResult = null;
+          return res;
+        }
+        if (res) {
+          lastCancelFailedResult = res;
+        }
+        return lastCancelFailedResult;
+      }
+
+      const retryRes = await killProcessTreeFn(child.pid, {
+        env,
+        timeoutMs: killTimeoutMs,
+        spawnedAtMs,
+        rootAlreadyExited: true,
+      });
+      if (retryRes?.ok === false) {
+        lastCancelFailedResult = retryRes;
+        return lastCancelFailedResult;
+      }
+      if (retryRes?.ok && (pipesClosed || retryRes.method === 'taskkill-descendants')) {
+        lastCancelFailedResult = null;
+        return retryRes;
+      }
+      return lastCancelFailedResult;
+    }
+
+    if (pipesClosed) {
+      return { ok: true, method: 'already-exited' };
+    }
+
+    const res = await killProcessTreeFn(child.pid, {
+      env,
+      timeoutMs: killTimeoutMs,
+      spawnedAtMs,
+      rootAlreadyExited: !isPosix,
+    });
+    if (res?.ok === false) {
+      lastCancelFailedResult = res;
+    }
+    return res;
+  };
 
   return {
     pid: child.pid,
     tmpOutputPath,
     hasExited: () => childExited,
+    hasClosed: () => pipesClosed,
     getProgress: () => ({
       events_count: state.events_count,
       last_event: state.last_event,
@@ -556,10 +824,13 @@ export function startCodexRun({ binPath, prefixArgs = [], spec, onProgress, env 
       session_id: state.session_id,
     }),
     cancel: () => {
-      if (childExited) {
-        return Promise.resolve({ ok: true, method: 'already-exited' });
+      if (inFlightCancelPromise) {
+        return inFlightCancelPromise;
       }
-      return killProcessTree(child.pid, { env, timeoutMs: isTestMode(env) ? 300 : 4000 });
+      inFlightCancelPromise = performCancel().finally(() => {
+        inFlightCancelPromise = null;
+      });
+      return inFlightCancelPromise;
     },
     donePromise,
   };

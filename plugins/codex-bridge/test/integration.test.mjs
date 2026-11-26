@@ -471,6 +471,27 @@ test('MCP integration: full lifecycle over stdio', async () => {
     assert.match(blocked.data.warnings[0], /blocked by policy/i);
     assert.ok(typeof blocked.data.stderr === 'string' && blocked.data.stderr.length > 0);
 
+    // 8c. max_runtime_sec enforcement terminates hanging child and releases workspace-write lock
+    const timedOutExec = await client.callTool('codex_exec', {
+      cwd: sandboxDir,
+      mode: 'workspace-write',
+      prompt: '[SCENARIO:hang_exec] exceed max runtime',
+      max_runtime_sec: 0.25,
+      wait_sec: 5,
+    });
+    assert.equal(timedOutExec.isError, true);
+    assert.equal(timedOutExec.data.status, 'timed_out');
+    assert.match(timedOutExec.data.error, /max_runtime_sec/i);
+
+    const afterTimeoutWrite = await client.callTool('codex_exec', {
+      cwd: sandboxDir,
+      mode: 'workspace-write',
+      prompt: '[SCENARIO:fast_exec] lock released after timeout',
+      wait_sec: 2,
+    });
+    assert.equal(afterTimeoutWrite.isError, false);
+    assert.equal(afterTimeoutWrite.data.status, 'completed');
+
     // 9. Verify no leaked temp output files
     const tmpFilesAfter = fs
       .readdirSync(os.tmpdir())

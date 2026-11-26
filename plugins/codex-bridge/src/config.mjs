@@ -205,22 +205,64 @@ export function resolveGitBinary(env = process.env, deps = {}) {
   return null;
 }
 
-/** Resolves the absolute path to Windows System32 taskkill.exe (or null if missing/POSIX). */
-export function resolveTaskkillBinary(env = process.env, deps = {}) {
+function getEnvCaseInsensitive(env, name) {
+  if (!env || typeof env !== 'object') {
+    return null;
+  }
+  if (env[name] !== undefined && env[name] !== null) {
+    return env[name];
+  }
+  const target = name.toLowerCase();
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === target && env[key] !== undefined && env[key] !== null) {
+      return env[key];
+    }
+  }
+  return null;
+}
+
+function resolveWindowsSystem32Binary(relativeParts, env = process.env, deps = {}) {
   const platform = deps.platform ?? process.platform;
   if (platform !== 'win32') {
     return null;
   }
   const existsSyncFn = deps.existsSync ?? fs.existsSync;
   const statSyncFn = deps.statSync ?? fs.statSync;
-  const systemRoot = isFullyQualifiedPath(env.SystemRoot, 'win32')
-    ? env.SystemRoot
-    : isFullyQualifiedPath(env.WINDIR, 'win32')
-      ? env.WINDIR
-      : null;
-  if (!systemRoot) {
-    return null;
+  const roots = [];
+  const seen = new Set();
+  for (const rawRoot of [
+    getEnvCaseInsensitive(env, 'SystemRoot'),
+    getEnvCaseInsensitive(env, 'WINDIR'),
+  ]) {
+    if (!isFullyQualifiedPath(rawRoot, 'win32')) {
+      continue;
+    }
+    const normalized = path.win32.resolve(rawRoot);
+    const dedupKey = normalized.toLowerCase();
+    if (!seen.has(dedupKey)) {
+      seen.add(dedupKey);
+      roots.push(normalized);
+    }
   }
-  const candidate = path.win32.resolve(systemRoot, 'System32', 'taskkill.exe');
-  return isExecutableFile(candidate, existsSyncFn, statSyncFn) ? candidate : null;
+  for (const root of roots) {
+    const candidate = path.win32.resolve(root, 'System32', ...relativeParts);
+    if (isExecutableFile(candidate, existsSyncFn, statSyncFn)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+/** Resolves the absolute path to Windows System32 taskkill.exe (or null if missing/POSIX). */
+export function resolveTaskkillBinary(env = process.env, deps = {}) {
+  return resolveWindowsSystem32Binary(['taskkill.exe'], env, deps);
+}
+
+/** Resolves the absolute path to Windows System32 powershell.exe (or null if missing/POSIX). */
+export function resolvePowershellBinary(env = process.env, deps = {}) {
+  return resolveWindowsSystem32Binary(
+    ['WindowsPowerShell', 'v1.0', 'powershell.exe'],
+    env,
+    deps
+  );
 }

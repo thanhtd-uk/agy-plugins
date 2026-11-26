@@ -8,11 +8,19 @@ import { fileURLToPath } from 'node:url';
 import {
   buildCodexExecArgs,
   buildCodexReviewInvocation,
+  findWindowsDescendants,
+  isTaskkillRootNotFoundError,
   killProcessTree,
   parseJsonlLine,
   resolveFallbackWorktreePath,
+  startCodexRun,
 } from '../src/codex-runner.mjs';
-import { resolveCodexBinary, resolveGitBinary, resolveTaskkillBinary } from '../src/config.mjs';
+import {
+  resolveCodexBinary,
+  resolveGitBinary,
+  resolvePowershellBinary,
+  resolveTaskkillBinary,
+} from '../src/config.mjs';
 import {
   composeCustomTargetReviewPrompt,
   composeExecPrompt,
@@ -1512,6 +1520,643 @@ test('JobManager max_runtime_sec retries failed timeout cancel and preserves tim
       worktree: null,
       usedExecFallback: false,
     });
+  } finally {
+    fs.rmSync(workDir, { recursive: true, force: true });
+  }
+});
+
+test('resolveTaskkillBinary and resolvePowershellBinary fall back across SystemRoot/WINDIR and handle case-insensitive env keys', () => {
+  const validFiles = new Set([
+    'C:\\RealWindows\\System32\\taskkill.exe',
+    'C:\\RealWindows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    'C:\\LowerRoot\\System32\\taskkill.exe',
+    'C:\\LowerRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+  ]);
+  const deps = {
+    platform: 'win32',
+    existsSync: (p) => validFiles.has(p),
+    statSync: () => ({ isFile: () => true }),
+  };
+
+  assert.equal(
+    resolveTaskkillBinary({ SystemRoot: 'C:\\MissingWindows', WINDIR: 'C:\\RealWindows' }, deps),
+    'C:\\RealWindows\\System32\\taskkill.exe'
+  );
+  assert.equal(
+    resolvePowershellBinary({ SystemRoot: 'C:\\MissingWindows', windir: 'C:\\RealWindows' }, deps),
+    'C:\\RealWindows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+  );
+  assert.equal(
+    resolveTaskkillBinary({ systemroot: 'C:\\LowerRoot' }, deps),
+    'C:\\LowerRoot\\System32\\taskkill.exe'
+  );
+  assert.equal(
+    resolvePowershellBinary({ SYSTEMROOT: 'C:\\LowerRoot' }, deps),
+    'C:\\LowerRoot\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
+  );
+  assert.equal(resolvePowershellBinary({}, deps), null);
+});
+
+test('killProcessTree on Windows fails closed when taskkill fails even if root PID is gone', async () => {
+  const deadRootKillFn = () => {
+    const err = new Error('ESRCH');
+    err.code = 'ESRCH';
+    throw err;
+  };
+  const taskkillBin = 'C:\\Windows\\System32\\taskkill.exe';
+
+  // 1. Partial tree kill (exit code 1: root killed, child access denied) must NOT become ok: true
+  const partialFailure = await killProcessTree(42424, {
+    platform: 'win32',
+    taskkillBin,
+    execFileFn: (_bin, _args, _opts, cb) => {
+      const err = new Error('Command failed');
+      err.code = 1;
+      cb(
+        err,
+        'SUCCESS: The process with PID 42424 has been terminated.\r\n',
+        'ERROR: The process with PID 42425 could not be terminated.\r\nReason: Access is denied.'
+      );
+    },
+    killFn: deadRootKillFn,
+  });
+  assert.equal(partialFailure.ok, false);
+  assert.match(partialFailure.error, /Access is denied/);
+
+  // 2. Timeout while root is already gone must fail closed
+  const timedOutDeadRoot = await killProcessTree(42424, {
+    platform: 'win32',
+    taskkillBin,
+    execFileFn: (_bin, _args, _opts, cb) => {
+      const err = new Error('timed out');
+      err.killed = true;
+      cb(err, '', '');
+    },
+    killFn: deadRootKillFn,
+  });
+  assert.equal(timedOutDeadRoot.ok, false);
+  assert.equal(timedOutDeadRoot.timedOut, true);
+
+  // 3. OS/spawn error (string err.code) while root is gone must fail closed
+  const spawnErrDeadRoot = await killProcessTree(42424, {
+    platform: 'win32',
+    taskkillBin,
+    execFileFn: (_bin, _args, _opts, cb) => {
+      const err = new Error('spawn EPERM');
+      err.code = 'EPERM';
+      cb(err, '', '');
+    },
+    killFn: deadRootKillFn,
+  });
+  assert.equal(spawnErrDeadRoot.ok, false);
+
+  // 4. Non-128 numeric exit code with localized stderr must fail closed
+  const localizedErr = await killProcessTree(42424, {
+    platform: 'win32',
+    taskkillBin,
+    execFileFn: (_bin, _args, _opts, cb) => {
+      const err = new Error('failed');
+      err.code = 1;
+      cb(err, '', 'FEHLER: Zugriff verweigert.');
+    },
+    killFn: deadRootKillFn,
+  });
+  assert.equal(localizedErr.ok, false);
+  assert.equal(
+    isTaskkillRootNotFoundError({ code: 128 }, '', 'FEHLER: Prozess nicht gefunden.', 42424),
+    true
+  );
+  assert.equal(
+    isTaskkillRootNotFoundError({ code: 1 }, '', 'ERROR: The process "42424" not found.', 42424),
+    false
+  );
+
+  // 5. Exit code 128 + descendant inspection
+  const noDescendants = await killProcessTree(42424, {
+    platform: 'win32',
+    taskkillBin,
+    execFileFn: (_bin, _args, _opts, cb) => {
+      const err = new Error('not found');
+      err.code = 128;
+      cb(err, '', 'FEHLER: Prozess nicht gefunden.');
+    },
+    killFn: deadRootKillFn,
+    findDescendantsFn: async () => ({ ok: true, pids: [] }),
+  });
+  assert.equal(noDescendants.ok, true);
+  assert.equal(noDescendants.method, 'taskkill-already-exited');
+
+  const killedPids = [];
+  const killedDescendants = await killProcessTree(42424, {
+    platform: 'win32',
+    taskkillBin,
+    execFileFn: (_bin, args, _opts, cb) => {
+      const targetPid = Number(args.at(-1));
+      killedPids.push(targetPid);
+      if (targetPid === 42424) {
+        const err = new Error('not found');
+        err.code = 128;
+        cb(err, '', 'ERROR: The process "42424" not found.');
+        return;
+      }
+      cb(null, `SUCCESS: killed ${targetPid}`, '');
+    },
+    killFn: deadRootKillFn,
+    findDescendantsFn: async () => ({ ok: true, pids: [55555] }),
+  });
+  assert.equal(killedDescendants.ok, true);
+  assert.equal(killedDescendants.method, 'taskkill-descendants');
+  assert.deepEqual(killedPids, [42424, 55555]);
+
+  const descendantKillFailed = await killProcessTree(42424, {
+    platform: 'win32',
+    taskkillBin,
+    execFileFn: (_bin, args, _opts, cb) => {
+      const targetPid = Number(args.at(-1));
+      if (targetPid === 42424) {
+        const err = new Error('not found');
+        err.code = 128;
+        cb(err, '', '');
+        return;
+      }
+      const err = new Error('Access denied');
+      err.code = 1;
+      cb(err, '', 'ERROR: Access is denied.');
+    },
+    killFn: deadRootKillFn,
+    findDescendantsFn: async () => ({ ok: true, pids: [55555] }),
+  });
+  assert.equal(descendantKillFailed.ok, false);
+  assert.equal(descendantKillFailed.method, 'taskkill-descendants');
+  assert.match(descendantKillFailed.error, /55555/);
+
+  const lookupFailed = await killProcessTree(42424, {
+    platform: 'win32',
+    taskkillBin,
+    execFileFn: (_bin, _args, _opts, cb) => {
+      const err = new Error('not found');
+      err.code = 128;
+      cb(err, '', '');
+    },
+    killFn: deadRootKillFn,
+    findDescendantsFn: async () => ({ ok: false, pids: [], error: 'CIM query failed' }),
+  });
+  assert.equal(lookupFailed.ok, false);
+  assert.match(lookupFailed.error, /CIM query failed/);
+
+  // 6. findWindowsDescendants filters PID reuse via CreationDate and fails closed when powershell.exe missing
+  const missingPs = await findWindowsDescendants(42424, { powershellBin: null });
+  assert.equal(missingPs.ok, false);
+  assert.match(missingPs.error, /powershell\.exe not found/i);
+
+  const nowMs = 1_700_000_000_000;
+  const filteredDescendants = await findWindowsDescendants(42424, {
+    powershellBin: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    spawnedAtMs: nowMs,
+    execFileFn: (_bin, _args, _opts, cb) => {
+      cb(null, `42424,${nowMs}\n1001,${nowMs - 5000}\n1002,${nowMs + 50}\n1002,${nowMs + 50}\n`, '');
+    },
+  });
+  assert.deepEqual(filteredDescendants, { ok: true, pids: [1002] });
+});
+
+test('startCodexRun + JobManager: second cancel after failed tree kill while childExited=true never returns cancelled', async () => {
+  const workDir = makeTempDir('cb-post-exit-cancel-');
+  const scriptPath = path.join(workDir, 'exit-with-pipe.mjs');
+  const gatePath = path.join(workDir, 'release-pipe.gate');
+  fs.writeFileSync(
+    scriptPath,
+    [
+      "import { spawn } from 'node:child_process';",
+      `const child = spawn(process.execPath, ['-e', ${JSON.stringify(
+        `const fs = require('node:fs'); const t = setInterval(() => { if (fs.existsSync(${JSON.stringify(gatePath)})) { clearInterval(t); process.exit(0); } }, 15);`
+      )}], { detached: true, stdio: ['ignore', 'inherit', 'inherit'], windowsHide: true });`,
+      'child.unref();',
+      "child.on('spawn', () => process.exit(0));",
+    ].join('\n'),
+    'utf8'
+  );
+
+  let killCalls = 0;
+  let sawRootAlreadyExited = false;
+  try {
+    const manager = new JobManager({
+      sessionStore: { recordSession: () => {} },
+      env: {
+        ...process.env,
+        CODEX_BRIDGE_TEST_MODE: '1',
+        CODEX_BRIDGE_BIN: process.execPath,
+        CODEX_BRIDGE_BIN_ARGS_PREFIX: JSON.stringify([scriptPath]),
+      },
+      cancelGraceMs: 40,
+      startRun: ({ spec, env }) =>
+        startCodexRun({
+          binPath: process.execPath,
+          prefixArgs: [scriptPath],
+          spec,
+          env,
+          killProcessTreeFn: async (_pid, opts) => {
+            killCalls += 1;
+            if (opts?.rootAlreadyExited) {
+              sawRootAlreadyExited = true;
+            }
+            return { ok: false, method: 'taskkill', error: 'Access denied to descendant' };
+          },
+        }),
+    });
+
+    const spec = validateExecInput(
+      { cwd: workDir, mode: 'workspace-write', prompt: 'orphan pipe', wait_sec: 0.05 },
+      { ...process.env, CODEX_BRIDGE_TEST_MODE: '1' }
+    );
+    const started = await manager.startAndWait(spec);
+    assert.equal(started.status, 'running');
+
+    // Wait briefly so parent exits (childExited=true) while child still holds pipe open (pipesClosed=false)
+    for (let i = 0; i < 40; i += 1) {
+      if (manager.jobs.get(started.job_id)?.run.hasExited()) break;
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    assert.equal(manager.jobs.get(started.job_id).run.hasExited(), true);
+    assert.equal(manager.jobs.get(started.job_id).run.hasClosed(), false);
+
+    const cancel1 = await manager.cancelJob(started.job_id);
+    assert.equal(cancel1.status, 'cancel_failed');
+    const cancel2 = await manager.cancelJob(started.job_id);
+    assert.equal(cancel2.status, 'cancel_failed');
+    assert.ok(killCalls >= 2);
+    if (process.platform === 'win32') {
+      assert.equal(sawRootAlreadyExited, true);
+    }
+
+    fs.writeFileSync(gatePath, 'done', 'utf8');
+    const finalRes = await manager.waitJob(started.job_id, 2);
+    assert.equal(finalRes.status, 'cancel_failed');
+    assert.match(finalRes.error, /process-tree termination failed/i);
+  } finally {
+    fs.writeFileSync(gatePath, 'done', 'utf8');
+    await new Promise((r) => setTimeout(r, 40));
+    fs.rmSync(workDir, { recursive: true, force: true });
+  }
+});
+
+if (process.platform === 'win32') {
+  test('Windows startCodexRun.cancel kills surviving descendant process after root exits', async () => {
+    const workDir = makeTempDir('cb-win-descendant-');
+    const launcherPath = path.join(workDir, 'spawn-orphan.mjs');
+    fs.writeFileSync(
+      launcherPath,
+      [
+        "import { spawn } from 'node:child_process';",
+        "const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 20000)'], { detached: true, stdio: ['ignore', 'inherit', 'inherit'], windowsHide: true });",
+        'child.unref();',
+        "child.on('spawn', () => {",
+        '  console.log(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: String(child.pid) } }));',
+        '  process.exit(0);',
+        '});',
+      ].join('\n'),
+      'utf8'
+    );
+
+    let descendantPid = null;
+    try {
+      const spec = validateExecInput(
+        { cwd: workDir, mode: 'read-only', prompt: 'spawn orphan', wait_sec: 1 },
+        { ...process.env, CODEX_BRIDGE_TEST_MODE: '1' }
+      );
+      const run = startCodexRun({
+        binPath: process.execPath,
+        prefixArgs: [launcherPath],
+        spec,
+        env: { ...process.env, CODEX_BRIDGE_TEST_MODE: '1' },
+      });
+      for (let i = 0; i < 60; i += 1) {
+        if (run.hasExited() && run.getProgress().events_count > 0) break;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.equal(run.hasExited(), true);
+      assert.equal(run.hasClosed(), false);
+
+      const cancelRes = await run.cancel();
+      assert.equal(cancelRes.ok, true);
+      assert.equal(cancelRes.method, 'taskkill-descendants');
+      const doneRes = await run.donePromise;
+      descendantPid = Number(doneRes.output.trim());
+      assert.ok(Number.isInteger(descendantPid) && descendantPid > 0);
+      assert.throws(() => process.kill(descendantPid, 0), /ESRCH/);
+      descendantPid = null;
+    } finally {
+      if (descendantPid) {
+        try {
+          process.kill(descendantPid, 'SIGKILL');
+        } catch {
+          // already exited
+        }
+      }
+      fs.rmSync(workDir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('JobManager enforces max_runtime_sec on late exit, stale cancel race, exhausted retries, and shutdown', async () => {
+  const workDir = makeTempDir('cb-runtime-edges-');
+  const fakeCodexPath = FAKE_CODEX_PATH;
+  const recordedSessions = [];
+  const baseEnv = {
+    ...process.env,
+    CODEX_BRIDGE_TEST_MODE: '1',
+    CODEX_BRIDGE_BIN: process.execPath,
+    CODEX_BRIDGE_BIN_ARGS_PREFIX: JSON.stringify([fakeCodexPath]),
+  };
+
+  try {
+    // 1. Late zero exit beating ttlTimer (via event-loop stall past deadlineMonoMs) reports timed_out with 0 cancel calls
+    let releaseLateBeat;
+    let beatCancelCalls = 0;
+    const beatManager = new JobManager({
+      sessionStore: { recordSession: (s) => recordedSessions.push(s) },
+      env: baseEnv,
+      cancelGraceMs: 25,
+      startRun: () => ({
+        pid: 300001,
+        getProgress: () => ({ events_count: 1, last_event: 'turn.started' }),
+        cancel: async () => {
+          beatCancelCalls += 1;
+          return { ok: true };
+        },
+        donePromise: new Promise((resolve) => {
+          releaseLateBeat = resolve;
+        }),
+      }),
+    });
+    const beatSpec = {
+      ...validateExecInput(
+        { cwd: workDir, mode: 'workspace-write', prompt: 'beat-timer', wait_sec: 0.05, persist_session: true },
+        baseEnv
+      ),
+      max_runtime_sec: 0.08,
+    };
+    const beatStart = await beatManager.startAndWait(beatSpec);
+    assert.equal(beatStart.status, 'running');
+    assert.equal(beatCancelCalls, 0);
+    const blockEnd = Date.now() + 60;
+    while (Date.now() < blockEnd) {
+      // Simulate synchronous event-loop stall past max_runtime_sec so donePromise resolves before ttlTimer fires
+    }
+    releaseLateBeat({
+      exitCode: 0,
+      signal: null,
+      spawnError: null,
+      output: 'too late',
+      stderr: '',
+      policyBlocked: false,
+      session_id: 'sess-beat-timer',
+      usage: null,
+      worktree: null,
+      usedExecFallback: false,
+    });
+    const beatFinal = await beatManager.waitJob(beatStart.job_id, 1);
+    assert.equal(beatFinal.status, 'timed_out');
+    assert.equal(beatCancelCalls, 0);
+    assert.equal(recordedSessions.length, 0);
+
+    // 2. Stale cancel promise from attempt 1 resolving ok:true after attempt 2 failed cannot mask cancel_failed
+    let releaseStale;
+    let cancelAttempt = 0;
+    const staleManager = new JobManager({
+      sessionStore: { recordSession: () => {} },
+      env: baseEnv,
+      cancelGraceMs: 45,
+      startRun: () => ({
+        pid: 300002,
+        getProgress: () => ({ events_count: 1, last_event: 'turn.started' }),
+        cancel: () => {
+          cancelAttempt += 1;
+          if (cancelAttempt === 1) {
+            return new Promise((resolve) => {
+              setTimeout(() => resolve({ ok: true, method: 'stale' }), 65);
+            });
+          }
+          return Promise.resolve({ ok: false, error: 'attempt 2 denied' });
+        },
+        donePromise: new Promise((resolve) => {
+          releaseStale = resolve;
+        }),
+      }),
+    });
+    const staleSpec = validateExecInput(
+      { cwd: workDir, mode: 'read-only', prompt: 'stale-cancel', wait_sec: 0.05 },
+      baseEnv
+    );
+    const staleStart = await staleManager.startAndWait(staleSpec);
+    const c1 = await staleManager.cancelJob(staleStart.job_id);
+    assert.equal(c1.status, 'cancel_failed');
+    const c2Promise = staleManager.cancelJob(staleStart.job_id);
+    // Let stale attempt 1 resolve ok:true while attempt 2 is active, then finish process within attempt 2's grace window
+    setTimeout(() => {
+      releaseStale({
+        exitCode: 0,
+        signal: null,
+        spawnError: null,
+        output: '',
+        stderr: '',
+        policyBlocked: false,
+        session_id: null,
+        usage: null,
+        worktree: null,
+        usedExecFallback: false,
+      });
+    }, 30);
+    const c2 = await c2Promise;
+    assert.equal(c2.status, 'cancel_failed');
+    assert.match(c2.error, /attempt 2 denied/);
+    const staleFinal = await staleManager.waitJob(staleStart.job_id, 1);
+    assert.equal(staleFinal.status, 'cancel_failed');
+    assert.match(staleFinal.error, /attempt 2 denied/);
+
+    // 3. Long wait_sec wakes promptly once maxTimeoutCancelAttempts are exhausted
+    let releaseExhaust;
+    const exhaustManager = new JobManager({
+      sessionStore: { recordSession: () => {} },
+      env: baseEnv,
+      cancelGraceMs: 20,
+      maxTimeoutCancelAttempts: 3,
+      startRun: () => ({
+        pid: 300003,
+        getProgress: () => ({ events_count: 1, last_event: 'turn.started' }),
+        cancel: async () => ({ ok: false, error: 'Access denied' }),
+        donePromise: new Promise((resolve) => {
+          releaseExhaust = resolve;
+        }),
+      }),
+    });
+    const exhaustSpec = {
+      ...validateExecInput(
+        { cwd: workDir, mode: 'workspace-write', prompt: 'exhaust-wake', wait_sec: 5 },
+        baseEnv
+      ),
+      max_runtime_sec: 0.02,
+    };
+    const t0 = Date.now();
+    const exhaustStart = await exhaustManager.startAndWait(exhaustSpec);
+    const wakeElapsedMs = Date.now() - t0;
+    assert.ok(wakeElapsedMs < 1000, `Expected prompt wakeup, took ${wakeElapsedMs}ms`);
+    assert.equal(exhaustStart.status, 'running');
+    assert.equal(exhaustStart.timed_out, true);
+    assert.equal(exhaustStart.timeout_cancel_exhausted, true);
+    assert.equal(exhaustStart.timeout_cancel_attempts, 3);
+    assert.equal(exhaustStart.cancel_error, 'Access denied');
+    assert.equal(
+      exhaustManager.listJobs().find((j) => j.job_id === exhaustStart.job_id).timed_out,
+      true
+    );
+
+    // waitJob after exhaustion does not spin-return immediately and waits up to wait_sec for donePromise
+    const waitAfterExhaust = await exhaustManager.waitJob(exhaustStart.job_id, 0.06);
+    assert.equal(waitAfterExhaust.status, 'running');
+    assert.equal(waitAfterExhaust.timeout_cancel_exhausted, true);
+
+    releaseExhaust({
+      exitCode: 0,
+      signal: null,
+      spawnError: null,
+      output: 'eventual exit',
+      stderr: '',
+      policyBlocked: false,
+      session_id: null,
+      usage: null,
+      worktree: null,
+      usedExecFallback: false,
+    });
+    const exhaustFinal = await exhaustManager.waitJob(exhaustStart.job_id, 1);
+    assert.equal(exhaustFinal.status, 'timed_out');
+    assert.match(exhaustFinal.error, /exceeded max_runtime_sec/i);
+
+    // 4. Timeout cancel where root exits while tree kill failed & pipes drain past graceMs -> retries exhaust & finalizes cancel_failed with timed_out: true
+    let releasePipeDrain;
+    let pipeDrainExited = false;
+    let pipeDrainCancelCalls = 0;
+    const drainFailManager = new JobManager({
+      sessionStore: { recordSession: () => {} },
+      env: baseEnv,
+      cancelGraceMs: 25,
+      maxTimeoutCancelAttempts: 2,
+      startRun: () => ({
+        pid: 300004,
+        hasExited: () => pipeDrainExited,
+        hasClosed: () => false,
+        getProgress: () => ({ events_count: 1, last_event: 'turn.started' }),
+        cancel: async () => {
+          pipeDrainCancelCalls += 1;
+          pipeDrainExited = true;
+          return { ok: false, error: 'descendant EPERM' };
+        },
+        donePromise: new Promise((resolve) => {
+          releasePipeDrain = resolve;
+        }),
+      }),
+    });
+    const drainSpec = {
+      ...validateExecInput(
+        { cwd: workDir, mode: 'read-only', prompt: 'drain-fail', wait_sec: 5 },
+        baseEnv
+      ),
+      max_runtime_sec: 0.02,
+    };
+    const drainStarted = await drainFailManager.startAndWait(drainSpec);
+    assert.equal(drainStarted.status, 'running');
+    assert.equal(drainStarted.timed_out, true);
+    assert.equal(drainStarted.timeout_cancel_exhausted, true);
+    assert.equal(pipeDrainCancelCalls, 2);
+    releasePipeDrain({
+      exitCode: 0,
+      signal: null,
+      spawnError: null,
+      output: '',
+      stderr: '',
+      policyBlocked: false,
+      session_id: null,
+      usage: null,
+      worktree: null,
+      usedExecFallback: false,
+    });
+    const drainFinal = await drainFailManager.waitJob(drainStarted.job_id, 1);
+    assert.equal(drainFinal.status, 'cancel_failed');
+    assert.equal(drainFinal.timed_out, true);
+    assert.match(drainFinal.error, /max_runtime_sec/i);
+
+    // 5. shutdownAll() before deadline + failed cancel + late post-deadline exit -> timed_out; new job still enforces max_runtime_sec
+    let shutdownRunIdx = 0;
+    let releaseBeforeShutdown;
+    let releaseAfterShutdown;
+    const reuseManager = new JobManager({
+      sessionStore: { recordSession: () => {} },
+      env: baseEnv,
+      cancelGraceMs: 20,
+      startRun: () => {
+        shutdownRunIdx += 1;
+        if (shutdownRunIdx === 1) {
+          return {
+            pid: 300005,
+            getProgress: () => ({ events_count: 1, last_event: 'turn.started' }),
+            cancel: async () => ({ ok: false, error: 'still alive during shutdown' }),
+            donePromise: new Promise((resolve) => {
+              releaseBeforeShutdown = resolve;
+            }),
+          };
+        }
+        return {
+          pid: 300006,
+          getProgress: () => ({ events_count: 1, last_event: 'turn.started' }),
+          cancel: async () => {
+            setTimeout(() => {
+              releaseAfterShutdown({
+                exitCode: 1,
+                signal: 'SIGTERM',
+                spawnError: null,
+                output: '',
+                stderr: '',
+                policyBlocked: false,
+                session_id: null,
+                usage: null,
+                worktree: null,
+                usedExecFallback: false,
+              });
+            }, 5);
+            return { ok: true };
+          },
+          donePromise: new Promise((resolve) => {
+            releaseAfterShutdown = resolve;
+          }),
+        };
+      },
+    });
+    const job1Start = await reuseManager.startAndWait({
+      ...validateExecInput({ cwd: workDir, mode: 'read-only', prompt: 'pre-shutdown', wait_sec: 0.05 }, baseEnv),
+      max_runtime_sec: 0.04,
+    });
+    await reuseManager.shutdownAll();
+    await new Promise((r) => setTimeout(r, 60));
+    releaseBeforeShutdown({
+      exitCode: 0,
+      signal: null,
+      spawnError: null,
+      output: 'late shutdown exit',
+      stderr: '',
+      policyBlocked: false,
+      session_id: null,
+      usage: null,
+      worktree: null,
+      usedExecFallback: false,
+    });
+    const job1Final = await reuseManager.waitJob(job1Start.job_id, 1);
+    assert.equal(job1Final.status, 'timed_out');
+
+    const job2Final = await reuseManager.startAndWait({
+      ...validateExecInput({ cwd: workDir, mode: 'read-only', prompt: 'post-shutdown', wait_sec: 1 }, baseEnv),
+      max_runtime_sec: 0.02,
+    });
+    assert.equal(job2Final.status, 'timed_out');
   } finally {
     fs.rmSync(workDir, { recursive: true, force: true });
   }

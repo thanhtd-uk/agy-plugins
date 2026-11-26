@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import {
   DEFAULT_JOB_WAIT_SEC,
+  DEFAULT_MAX_RUNTIME_SEC,
   MAX_WAIT_SEC,
   getMaxConcurrentJobs,
   isTestMode,
@@ -42,14 +44,20 @@ export function detectPolicyBlockWarning(stderr, policyBlocked = false) {
  * per-cwd workspace-write locks, and clean process-tree cancellation.
  */
 export class JobManager {
-  constructor({ sessionStore, env = process.env, startRun = startCodexRun, cancelGraceMs = null }) {
+  constructor({
+    sessionStore,
+    env = process.env,
+    startRun = startCodexRun,
+    cancelGraceMs = null,
+    maxTimeoutCancelAttempts = 3,
+  }) {
     this.sessionStore = sessionStore;
     this.env = env;
     this.startRun = startRun;
     this.cancelGraceMs = cancelGraceMs;
+    this.maxTimeoutCancelAttempts = maxTimeoutCancelAttempts;
     this.jobs = new Map();
     this.writeLocks = new Map();
-    this.shuttingDown = false;
   }
 
   _countRunning() {
@@ -81,6 +89,24 @@ export class JobManager {
 
   _buildRunningPayload(job) {
     const elapsed_sec = Number(((Date.now() - job.startedAtMs) / 1000).toFixed(1));
+    if (job.timedOut) {
+      return {
+        status: 'running',
+        timed_out: true,
+        job_id: job.job_id,
+        pid: job.run.pid ?? null,
+        kind: job.spec.kind,
+        mode: job.spec.mode,
+        cwd: job.spec.cwd,
+        elapsed_sec,
+        max_runtime_sec: job.spec.max_runtime_sec,
+        timeout_cancel_attempts: job.timeoutCancelAttempts,
+        ...(job.timeoutCancelExhausted ? { timeout_cancel_exhausted: true } : {}),
+        ...(job.lastCancelError ? { cancel_error: job.lastCancelError } : {}),
+        progress: job.run.getProgress(),
+        hint: `Codex job exceeded max_runtime_sec (${job.spec.max_runtime_sec}s), but process termination has not completed yet. Call codex_job({ action: "cancel", job_id }) to retry or inspect OS pid=${job.run.pid ?? 'unknown'}.`,
+      };
+    }
     return {
       status: 'running',
       job_id: job.job_id,
@@ -118,20 +144,44 @@ export class JobManager {
     const binInfo = resolveCodexBinary(this.env);
     const job_id = `job_${crypto.randomBytes(6).toString('hex')}`;
     const startedAtMs = Date.now();
+    const startedMonoMs = performance.now();
+    const maxRuntimeSec =
+      Number.isFinite(spec.max_runtime_sec) && spec.max_runtime_sec > 0
+        ? spec.max_runtime_sec
+        : DEFAULT_MAX_RUNTIME_SEC;
+    const deadlineMonoMs = startedMonoMs + maxRuntimeSec * 1000;
 
     if (spec.mode === 'workspace-write') {
       this.writeLocks.set(spec.lockKey, job_id);
     }
+
+    let resolveTimeoutExhausted;
+    const timeoutExhaustedPromise = new Promise((resolve) => {
+      resolveTimeoutExhausted = resolve;
+    });
 
     const job = {
       job_id,
       spec,
       status: 'running',
       startedAtMs,
+      deadlineMonoMs,
       finishedAtMs: null,
       cancelReason: null,
       timedOut: false,
+      exiting: false,
+      shutdownRequested: false,
+      treeTerminationFailed: false,
+      treeTerminationError: null,
+      timeoutCancelAttempts: 0,
+      timeoutCancelExhausted: false,
+      timeoutExhaustedPromise,
+      resolveTimeoutExhausted,
+      cancelOpSeq: 0,
       activeCancelToken: null,
+      activeCancelPromise: null,
+      lastCancelResult: null,
+      lastCancelError: null,
       ttlTimer: null,
       run: null,
       finalPayload: null,
@@ -154,50 +204,77 @@ export class JobManager {
 
     this.jobs.set(job_id, job);
 
-    const maxTimeoutCancelAttempts = 3;
-    const scheduleTimeoutCancel = (attempt = 1) => {
-      if (job.status !== 'running' || this.shuttingDown) {
+    const runTimeoutCancel = async (attempt = 1) => {
+      job.ttlTimer = null;
+      if (job.status !== 'running' || job.exiting || job.shutdownRequested) {
         return;
       }
       job.timedOut = true;
-      if (job.run.hasExited?.()) {
+      if (job.run.hasExited?.() && job.run.hasClosed?.() !== false) {
         return;
       }
-      void this.cancelJob(job_id, 'max_runtime_exceeded')
-        .then((res) => {
-          if (
-            job.status === 'running' &&
-            !this.shuttingDown &&
-            !job.run.hasExited?.() &&
-            res?.status === 'cancel_failed' &&
-            attempt < maxTimeoutCancelAttempts
-          ) {
-            const retryDelayMs = this.cancelGraceMs ?? (isTestMode(this.env) ? 50 : 5000);
-            job.ttlTimer = setTimeout(() => {
-              scheduleTimeoutCancel(attempt + 1);
-            }, retryDelayMs);
-            job.ttlTimer.unref();
-          }
-        })
-        .catch(() => {});
+      job.timeoutCancelAttempts = attempt;
+      let res;
+      try {
+        res = await this.cancelJob(job_id, 'max_runtime_exceeded');
+      } catch (err) {
+        res = {
+          status: 'cancel_failed',
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+      if (job.status !== 'running' || job.exiting || job.shutdownRequested) {
+        return;
+      }
+      if (job.run.hasExited?.() && job.run.hasClosed?.() !== false) {
+        return;
+      }
+      if (res?.status === 'cancel_failed') {
+        if (attempt < this.maxTimeoutCancelAttempts) {
+          const retryDelayMs = this.cancelGraceMs ?? (isTestMode(this.env) ? 50 : 5000);
+          job.ttlTimer = setTimeout(() => {
+            void runTimeoutCancel(attempt + 1);
+          }, retryDelayMs);
+          job.ttlTimer.unref();
+        } else {
+          job.timeoutCancelExhausted = true;
+          job.resolveTimeoutExhausted('timeout_exhausted');
+        }
+      }
     };
 
+    const initialDelayMs = Math.max(0, Math.ceil(job.deadlineMonoMs - performance.now()));
     job.ttlTimer = setTimeout(() => {
-      scheduleTimeoutCancel(1);
-    }, spec.max_runtime_sec * 1000);
+      void runTimeoutCancel(1);
+    }, initialDelayMs);
     job.ttlTimer.unref();
 
     job.donePromise = job.run.donePromise.then(async (res) => {
+      const exitedMonoMs = performance.now();
+      job.exiting = true;
       if (job.ttlTimer) {
         clearTimeout(job.ttlTimer);
         job.ttlTimer = null;
       }
+      if (exitedMonoMs >= job.deadlineMonoMs) {
+        job.timedOut = true;
+      }
+
       let cancelRes = job.lastCancelResult ?? null;
       if (job.activeCancelPromise) {
         cancelRes = await job.activeCancelPromise;
       }
+      if (job.ttlTimer) {
+        clearTimeout(job.ttlTimer);
+        job.ttlTimer = null;
+      }
+      if (job.lastCancelResult && (!cancelRes || cancelRes.ok !== false)) {
+        cancelRes = job.lastCancelResult;
+      }
+
       const treeTerminationFailed = Boolean(
-        job.cancelReason && cancelRes && cancelRes.ok === false
+        job.treeTerminationFailed ||
+          (job.cancelReason && cancelRes && cancelRes.ok === false)
       );
       if (spec.mode === 'workspace-write' && this.writeLocks.get(spec.lockKey) === job_id) {
         this.writeLocks.delete(spec.lockKey);
@@ -224,6 +301,7 @@ export class JobManager {
       }
 
       job.status = finalStatus;
+      job.resolveTimeoutExhausted('done');
 
       const warnings = [];
       const returnedSessionId =
@@ -255,6 +333,24 @@ export class JobManager {
       }
       const includeStderr = (finalStatus === 'failed' || Boolean(policyWarning)) && Boolean(res.stderr);
 
+      const failureDetail = job.treeTerminationError || cancelRes?.error || 'unknown error';
+      let errorPayload = {};
+      if (treeTerminationFailed) {
+        errorPayload = {
+          pid: job.run.pid ?? null,
+          ...(job.timedOut ? { timed_out: true } : {}),
+          error: job.timedOut
+            ? `Codex exceeded max_runtime_sec (${maxRuntimeSec}s) and exited during cancellation, but process-tree termination failed (${failureDetail}). Verify no descendant processes remain.`
+            : `Codex exited during cancellation, but process-tree termination failed (${failureDetail}). Verify no descendant processes remain.`,
+        };
+      } else if (res.spawnError) {
+        errorPayload = { error: res.spawnError };
+      } else if (finalStatus === 'timed_out') {
+        errorPayload = {
+          error: `Codex job exceeded max_runtime_sec (${maxRuntimeSec}s).${job.lastCancelError ? ` Last termination error: ${job.lastCancelError}` : ''}`,
+        };
+      }
+
       job.finalPayload = {
         status: finalStatus,
         job_id,
@@ -271,14 +367,7 @@ export class JobManager {
         output,
         truncated,
         ...(truncated ? { original_output_chars: originalChars } : {}),
-        ...(treeTerminationFailed
-          ? {
-              pid: job.run.pid ?? null,
-              error: `Codex exited during cancellation, but process-tree termination failed (${cancelRes?.error || 'unknown error'}). Verify no descendant processes remain.`,
-            }
-          : res.spawnError
-            ? { error: res.spawnError }
-            : {}),
+        ...errorPayload,
         ...(includeStderr ? { stderr: res.stderr } : {}),
       };
 
@@ -287,10 +376,11 @@ export class JobManager {
 
     const race = await Promise.race([
       job.donePromise.then(() => 'done'),
+      job.timeoutExhaustedPromise,
       sleepRace(spec.wait_sec * 1000),
     ]);
 
-    if (race === 'done') {
+    if (race === 'done' || job.status !== 'running') {
       return this._buildFinalPayload(job);
     }
     return this._buildRunningPayload(job);
@@ -313,10 +403,11 @@ export class JobManager {
     }
     const clampedWait = Math.min(Math.max(rawWait, minWait), MAX_WAIT_SEC);
 
-    const race = await Promise.race([
-      job.donePromise.then(() => 'done'),
-      sleepRace(clampedWait * 1000),
-    ]);
+    const racers = [job.donePromise.then(() => 'done'), sleepRace(clampedWait * 1000)];
+    if (!job.timeoutCancelExhausted) {
+      racers.push(job.timeoutExhaustedPromise);
+    }
+    const race = await Promise.race(racers);
     if (race === 'done' || job.status !== 'running') {
       return this._buildFinalPayload(job);
     }
@@ -349,33 +440,55 @@ export class JobManager {
     job.cancelReason = reason;
     const graceMs = this.cancelGraceMs ?? (isTestMode(this.env) ? 500 : 5000);
     if (!job.activeCancelPromise) {
+      const opSeq = ++job.cancelOpSeq;
       job.lastCancelError = null;
       job.lastCancelResult = null;
-      const cancelPromise = raceReferencedTimeout(
-        Promise.resolve()
-          .then(() => job.run.cancel())
-          .then((res) => {
-            const normalized = res ?? null;
+      const rawCancelPromise = Promise.resolve()
+        .then(() => job.run.cancel())
+        .then((res) => {
+          const normalized = res ?? null;
+          if (job.cancelOpSeq === opSeq) {
             job.lastCancelResult = normalized;
-            if (normalized && normalized.ok === false && normalized.error) {
-              job.lastCancelError = normalized.error;
+            if (normalized && normalized.ok === false) {
+              if (normalized.error) {
+                job.lastCancelError = normalized.error;
+              }
+              if (job.run.hasExited?.() && job.run.hasClosed?.() === false) {
+                job.treeTerminationFailed = true;
+                job.treeTerminationError =
+                  normalized.error || job.lastCancelError || 'unknown error';
+              }
+            } else if (normalized && normalized.ok === true) {
+              job.treeTerminationFailed = false;
+              job.treeTerminationError = null;
             }
-            return normalized;
-          })
-          .catch((err) => {
-            const msg = err instanceof Error ? err.message : String(err);
+          }
+          return normalized;
+        })
+        .catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          const failed = { ok: false, error: msg };
+          if (job.cancelOpSeq === opSeq) {
             job.lastCancelError = msg;
-            const failed = { ok: false, error: msg };
             job.lastCancelResult = failed;
-            return failed;
-          }),
-        graceMs
-      )
+            if (job.run.hasExited?.() && job.run.hasClosed?.() === false) {
+              job.treeTerminationFailed = true;
+              job.treeTerminationError = msg;
+            }
+          }
+          return failed;
+        });
+
+      const cancelPromise = raceReferencedTimeout(rawCancelPromise, graceMs)
         .then((res) => {
           if (res === 'timeout') {
-            job.lastCancelError = job.lastCancelError || 'cancellation timed out';
-            const timedOut = { ok: false, error: job.lastCancelError };
-            job.lastCancelResult = timedOut;
+            const errMsg =
+              (job.cancelOpSeq === opSeq ? job.lastCancelError : null) || 'cancellation timed out';
+            const timedOut = { ok: false, error: errMsg };
+            if (job.cancelOpSeq === opSeq) {
+              job.lastCancelError = errMsg;
+              job.lastCancelResult = timedOut;
+            }
             return timedOut;
           }
           return res;
@@ -395,7 +508,15 @@ export class JobManager {
     if (race === 'done' || job.status !== 'running') {
       return this._buildFinalPayload(job);
     }
-    if (job.activeCancelToken === cancelToken) {
+    if (
+      job.lastCancelResult?.ok === false &&
+      job.run.hasExited?.() &&
+      job.run.hasClosed?.() === false
+    ) {
+      job.treeTerminationFailed = true;
+      job.treeTerminationError =
+        job.lastCancelResult.error || job.lastCancelError || 'unknown error';
+    } else if (job.activeCancelToken === cancelToken) {
       job.cancelReason = null;
       job.activeCancelToken = null;
     }
@@ -416,6 +537,7 @@ export class JobManager {
     return Array.from(this.jobs.values()).map((job) => ({
       job_id: job.job_id,
       status: job.status,
+      ...(job.timedOut && job.status === 'running' ? { timed_out: true } : {}),
       kind: job.spec.kind,
       mode: job.spec.mode,
       cwd: job.spec.cwd,
@@ -427,10 +549,10 @@ export class JobManager {
 
   /** Cancels all active jobs and drains pending cancellations during server shutdown. */
   async shutdownAll() {
-    this.shuttingDown = true;
     const graceMs = this.cancelGraceMs ?? (isTestMode(this.env) ? 500 : 5000);
     const active = Array.from(this.jobs.values()).filter((j) => j.status === 'running');
     for (const j of active) {
+      j.shutdownRequested = true;
       if (j.ttlTimer) {
         clearTimeout(j.ttlTimer);
         j.ttlTimer = null;
