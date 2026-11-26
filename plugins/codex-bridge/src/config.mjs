@@ -12,6 +12,12 @@ export const MIN_MAX_OUTPUT_CHARS = 500;
 export const MAX_MAX_OUTPUT_CHARS = 8500;
 export const STDERR_TAIL_MAX_CHARS = 4096;
 export const DEFAULT_MAX_CONCURRENT_JOBS = 3;
+export const DEFAULT_FAST_MODEL = 'gpt-6.2-sol';
+export const DEFAULT_FAST_EFFORT = 'high';
+export const DEFAULT_DEEP_MODEL = 'gpt-6.2-astra';
+export const DEFAULT_DEEP_EFFORT = 'high';
+export const DEFAULT_PROFILE = 'fast';
+export const ALLOWED_PROFILES = new Set(['fast', 'deep']);
 
 /** Returns true when fast test-scale timeouts are enabled via env. */
 export function isTestMode(env = process.env) {
@@ -27,10 +33,38 @@ export function getMaxConcurrentJobs(env = process.env) {
   return DEFAULT_MAX_CONCURRENT_JOBS;
 }
 
-/** Returns default model override from env or null to inherit ~/.codex/config.toml. */
+/** Returns default model override from env or null when unset. */
 export function getDefaultModel(env = process.env) {
   const val = env.CODEX_BRIDGE_MODEL?.trim();
   return val ? val : null;
+}
+
+/**
+ * Returns resolved fast/deep profile defaults decoupled from ~/.codex/config.toml,
+ * honoring optional environment overrides.
+ */
+export function getProfileConfig(env = process.env) {
+  const fastModel = env.CODEX_BRIDGE_FAST_MODEL?.trim() || DEFAULT_FAST_MODEL;
+  const fastEffort = env.CODEX_BRIDGE_FAST_EFFORT?.trim() || DEFAULT_FAST_EFFORT;
+  const deepModel = env.CODEX_BRIDGE_DEEP_MODEL?.trim() || DEFAULT_DEEP_MODEL;
+  const deepEffort = env.CODEX_BRIDGE_DEEP_EFFORT?.trim() || DEFAULT_DEEP_EFFORT;
+  const rawDefaultProfile = env.CODEX_BRIDGE_DEFAULT_PROFILE?.trim();
+  let defaultProfile = DEFAULT_PROFILE;
+  if (rawDefaultProfile) {
+    const normalized = rawDefaultProfile.toLowerCase();
+    if (!ALLOWED_PROFILES.has(normalized)) {
+      throw new Error(
+        `Invalid CODEX_BRIDGE_DEFAULT_PROFILE "${rawDefaultProfile}". Allowed values are "fast" or "deep".`
+      );
+    }
+    defaultProfile = normalized;
+  }
+  return {
+    fast: { model: fastModel, reasoning_effort: fastEffort },
+    deep: { model: deepModel, reasoning_effort: deepEffort },
+    defaultProfile,
+    legacyModel: getDefaultModel(env),
+  };
 }
 
 /** Returns the file path for the bridge-owned session ledger. */

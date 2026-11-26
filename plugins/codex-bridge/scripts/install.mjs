@@ -3,14 +3,31 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { getSessionLedgerPath, resolveCodexBinary } from '../src/config.mjs';
+import {
+  DEFAULT_PROFILE,
+  getDefaultModel,
+  getProfileConfig,
+  getSessionLedgerPath,
+  resolveCodexBinary,
+} from '../src/config.mjs';
+import { EFFORT_RE, MODEL_RE } from '../src/validation.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PLUGIN_ROOT = path.resolve(__dirname, '..');
 const DEFAULT_TARGET = path.join(os.homedir(), '.gemini', 'config', 'plugins', 'codex-bridge');
 
-const RUNTIME_ITEMS = ['plugin.json', 'mcp_config.json', 'package.json', 'README.md', 'assets', 'rules', 'src'];
+const RUNTIME_ITEMS = [
+  'plugin.json',
+  'mcp_config.json',
+  'package.json',
+  'README.md',
+  'assets',
+  'rules',
+  'skills',
+  'src',
+];
+const BUNDLED_SKILLS = ['codex-offload', 'codex-off', 'codex-deep'];
 
 function parseArgs(argv) {
   const cmd = argv[0] || 'doctor';
@@ -269,6 +286,33 @@ function cmdDoctor(target) {
   console.log(`Source rules/AGENTS.md: ${rulesBytes} bytes (${rulesBytes < 1536 ? 'OK <1.5KB' : 'TOO LARGE'})`);
   if (rulesBytes >= 1536) healthy = false;
 
+  for (const skillName of BUNDLED_SKILLS) {
+    const skillPath = path.join(PLUGIN_ROOT, 'skills', skillName, 'SKILL.md');
+    const hasSkill = fs.existsSync(skillPath);
+    console.log(`Bundled skill /${skillName}: ${hasSkill ? 'present' : 'MISSING'}`);
+    if (!hasSkill) healthy = false;
+  }
+
+  try {
+    const profiles = getProfileConfig();
+    const legacy = getDefaultModel();
+    const invalidSlugs = [];
+    if (!MODEL_RE.test(profiles.fast.model)) invalidSlugs.push(`fast.model="${profiles.fast.model}"`);
+    if (!EFFORT_RE.test(profiles.fast.reasoning_effort)) invalidSlugs.push(`fast.effort="${profiles.fast.reasoning_effort}"`);
+    if (!MODEL_RE.test(profiles.deep.model)) invalidSlugs.push(`deep.model="${profiles.deep.model}"`);
+    if (!EFFORT_RE.test(profiles.deep.reasoning_effort)) invalidSlugs.push(`deep.effort="${profiles.deep.reasoning_effort}"`);
+    if (legacy && !MODEL_RE.test(legacy)) invalidSlugs.push(`CODEX_BRIDGE_MODEL="${legacy}"`);
+    if (invalidSlugs.length > 0) {
+      throw new Error(`Invalid slug(s): ${invalidSlugs.join(', ')}`);
+    }
+    console.log(
+      `Profiles: default=${profiles.defaultProfile || DEFAULT_PROFILE} | fast=${profiles.fast.model} (${profiles.fast.reasoning_effort}) | deep=${profiles.deep.model} (${profiles.deep.reasoning_effort})${legacy ? ` | CODEX_BRIDGE_MODEL=${legacy}` : ''}`
+    );
+  } catch (err) {
+    console.error(`Profile config: FAIL (${err.message})`);
+    healthy = false;
+  }
+
   const srcVal = runAgyValidate(PLUGIN_ROOT);
   console.log(
     `Source strict validate: ${srcVal.skipped ? 'SKIPPED' : srcVal.ok ? 'PASS' : 'FAIL'}`
@@ -278,6 +322,11 @@ function cmdDoctor(target) {
   const installed = fs.existsSync(path.join(target, 'plugin.json'));
   console.log(`Installed target (${target}): ${installed ? 'present' : 'not installed'}`);
   if (installed) {
+    for (const skillName of BUNDLED_SKILLS) {
+      const installedSkill = fs.existsSync(path.join(target, 'skills', skillName, 'SKILL.md'));
+      console.log(`Installed skill /${skillName}: ${installedSkill ? 'present' : 'MISSING'}`);
+      if (!installedSkill) healthy = false;
+    }
     const dstVal = runAgyValidate(target);
     console.log(
       `Installed strict validate: ${dstVal.skipped ? 'SKIPPED' : dstVal.ok ? 'PASS' : 'FAIL'}`

@@ -1,14 +1,17 @@
 # Codex Bridge (`codex-bridge`)
 
-Zero-dependency Local Stdio MCP Server (Node.js >= 20, pure ESM) connecting **Antigravity Orchestrator** with your local **Codex CLI** (`codex exec` / `codex exec resume` / `codex exec review`).
+Zero-dependency Local Stdio MCP Server (Node.js >= 20, pure ESM) pairing **Antigravity Orchestrator** with your local **Codex CLI** (`codex exec` / `codex exec resume` / `codex exec review`) in a two-tier peer workflow.
 
 ## Features
 
-- **Ephemeral by default**: Runs with `--ephemeral` so one-off orchestrator queries do not pollute your personal `~/.codex` session history. Enable `persist_session: true` only when multi-turn `resume` is useful, and clean up via `codex_session`.
-- **Safe isolation modes**: Defaults to `read-only`. Supports `worktree` (`--worktree`, isolated Git worktree for diff inspection before merging) and `workspace-write` (direct workspace edits, with per-`cwd` write locking). `danger-full-access` is disabled.
-- **Beats Antigravity's 180s MCP timeout**: Waits synchronously up to `145s` (`wait_sec <= 150s`), then seamlessly transitions long runs into a background `job_id` managed via `codex_job` (`wait` long-poll up to `140s`, `status`, `cancel`, `list`).
-- **Windows-safe process handling**: Passes prompts over `stdin` (`-`) to avoid the 8191-char command-line limit, spawns `codex.exe` with `shell: false`, reads clean output from `-o <tmpfile>` capped at `<= 8.5 KB`, and terminates process trees with `taskkill /T /F`.
-- **Inherits `~/.codex/config.toml`**: Inherits your configured Codex CLI model and `model_reasoning_effort` from `~/.codex/config.toml` unless overridden per call or via `CODEX_BRIDGE_MODEL`.
+- **Two-tier model profiles decoupled from `~/.codex/config.toml`**:
+  - `profile: "fast"` *(default)* → `gpt-6.2-sol` (`reasoning_effort: "high"`) for fast second opinions, routine reviews, independent edits/tests, and low-quota offload.
+  - `profile: "deep"` → `gpt-6.2-astra` (`reasoning_effort: "high"`, overrideable to `xhigh`/`ultra`) for major architecture, stubborn bugs, and high-risk reviews.
+  - Changing your interactive model in Codex App / `~/.codex/config.toml` never silently alters `codex-bridge` calls, and every tool response includes the resolved `profile`, `model`, and `reasoning_effort`.
+- **Bundled `/codex-offload` slash skill**: Automatically registers `/codex-offload` in Antigravity chat when installed so you can conserve Gemini quota on demand by delegating routine implementation/tests/reviews to GPT-6.2 Sol (`workspace-write` for routine edits, `worktree` for risky refactors) while Gemini plans and verifies.
+- **Win-Win peer handoff**: Prompts invite Codex to act as a senior peer engineer — flagging flawed assumptions, edge cases, or cleaner alternatives instead of following one-way commands blindly.
+- **Session model preservation**: Runs `--ephemeral` by default; when `persist_session: true` is used, resuming via `session_id` without specifying `profile`/`model` preserves that tracked session's saved profile/model (and omits `-m` on untracked personal sessions).
+- **Safe isolation modes & Windows process handling**: Defaults to `read-only`; supports `worktree` (`--worktree`) and `workspace-write` (per-`cwd` lock). Passes prompts over `stdin` (`-`), caps output at `<= 8.5 KB`, transitions runs exceeding `145s` to background `job_id`, and kills process trees with `taskkill /T /F`.
 
 ## Prerequisites
 
@@ -30,17 +33,17 @@ npm --prefix plugins/codex-bridge run install:plugin
 npm --prefix plugins/codex-bridge run doctor
 ```
 
-Then reload or start a new Antigravity conversation so the plugin's MCP server and rules are loaded.
+Then reload or start a new Antigravity conversation so the plugin's MCP server, rules, and slash skills (`/codex-offload`, `/codex-deep`, `/codex-off`) are loaded.
 
 ## Installation & Diagnostics Commands
 
 Run from `plugins/codex-bridge/`:
 
 ```powershell
-# Install runtime files to ~/.gemini/config/plugins/codex-bridge and run strict validation
+# Install runtime files (including bundled slash skills) to ~/.gemini/config/plugins/codex-bridge and run strict validation
 node scripts/install.mjs install
 
-# Check Node, Codex CLI, auth, rules size, and strict plugin validation
+# Check Node, Codex CLI, auth, rules size, bundled skills, profile mapping, and strict validation
 node scripts/install.mjs doctor
 
 # Remove installed plugin from ~/.gemini/config/plugins/codex-bridge
@@ -51,8 +54,8 @@ node scripts/install.mjs uninstall
 
 | Tool | Purpose | Key Parameters |
 | :--- | :--- | :--- |
-| `codex_exec` | Run `codex exec` or `codex exec resume` | `cwd` (required abs path), `prompt`, `mode` (`read-only`\|`worktree`\|`workspace-write`), `focus_files`, `context`, `constraints`, `persist_session`, `session_id`, `model`, `reasoning_effort`, `wait_sec`, `max_runtime_sec`, `max_output_chars` |
-| `codex_review` | Run ephemeral `read-only` review | `cwd` (required Git repo), `uncommitted` / `base` / `commit`, `title`, `prompt`, `model`, `reasoning_effort`, `wait_sec` |
+| `codex_exec` | Run `codex exec` or `codex exec resume` | `cwd` (required abs path), `prompt`, `mode` (`read-only`\|`worktree`\|`workspace-write`), `profile` (`fast`\|`deep`), `model`, `reasoning_effort`, `focus_files`, `context`, `constraints`, `persist_session`, `session_id`, `wait_sec`, `max_runtime_sec`, `max_output_chars` |
+| `codex_review` | Run ephemeral `read-only` review | `cwd` (required Git repo), `uncommitted` / `base` / `commit`, `title`, `prompt`, `profile` (`fast`\|`deep`), `model`, `reasoning_effort`, `wait_sec` |
 | `codex_job` | Manage background jobs (>145s) | `action` (`wait`\|`status`\|`cancel`\|`list`), `job_id`, `wait_sec` |
 | `codex_session` | Manage bridge-tracked sessions | `action` (`list`\|`archive`\|`delete`), `session_id`, `allow_untracked` |
 
@@ -60,9 +63,14 @@ node scripts/install.mjs uninstall
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
+| `CODEX_BRIDGE_DEFAULT_PROFILE` | `fast` | Default tier when `profile` and `model` are omitted (`fast` or `deep`). |
+| `CODEX_BRIDGE_FAST_MODEL` | `gpt-6.2-sol` | Model slug mapped to `profile: "fast"`. |
+| `CODEX_BRIDGE_FAST_EFFORT` | `high` | Default `reasoning_effort` for `profile: "fast"`. |
+| `CODEX_BRIDGE_DEEP_MODEL` | `gpt-6.2-astra` | Model slug mapped to `profile: "deep"`. |
+| `CODEX_BRIDGE_DEEP_EFFORT` | `high` | Default `reasoning_effort` for `profile: "deep"`. |
+| `CODEX_BRIDGE_MODEL` | Unset | Optional legacy raw model slug override when `profile` and `model` are omitted. |
 | `CODEX_BRIDGE_BIN` | Auto-detected | Explicit path to `codex.exe` (falls back to `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`, then `PATH`). |
 | `CODEX_BRIDGE_GIT_BIN` | Auto-detected | Optional fully qualified path to `git.exe` / `git`. |
-| `CODEX_BRIDGE_MODEL` | Inherited from `~/.codex/config.toml` | Default model slug override when tool `model` is omitted. |
 | `CODEX_BRIDGE_MAX_JOBS` | `3` | Maximum concurrent Codex jobs (`1..10`). |
 | `CODEX_BRIDGE_SESSION_STORE` | `%LOCALAPPDATA%\codex-bridge\sessions.json` | Path to the bridge-owned session ledger. |
 

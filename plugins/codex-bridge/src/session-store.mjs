@@ -79,8 +79,30 @@ export class SessionStore {
     );
   }
 
+  /** Returns a tracked bridge session entry by session_id, or null if untracked. */
+  getSession(session_id) {
+    if (typeof session_id !== 'string' || !session_id.trim()) {
+      return null;
+    }
+    const sid = session_id.trim();
+    const ledger = this._readLedger();
+    if (!this._hasTrackedEntry(ledger.sessions, sid)) {
+      return null;
+    }
+    return ledger.sessions[sid];
+  }
+
   /** Records or updates a persistent bridge session in the ledger. */
-  recordSession({ session_id, cwd, mode, summary, onlyIfTracked = false }) {
+  recordSession({
+    session_id,
+    cwd,
+    mode,
+    profile = null,
+    model = null,
+    reasoning_effort = null,
+    summary,
+    onlyIfTracked = false,
+  }) {
     if (!session_id) return null;
     const ledger = this._readLedger();
     const now = new Date().toISOString();
@@ -90,10 +112,19 @@ export class SessionStore {
     if (onlyIfTracked && !existing) {
       return null;
     }
+    const preserveExistingModel = profile === 'inherited' || model === null;
+    const nextProfile = preserveExistingModel ? (existing?.profile ?? null) : profile;
+    const nextModel = preserveExistingModel ? (existing?.model ?? null) : model;
+    const nextEffort = preserveExistingModel
+      ? (reasoning_effort ?? existing?.reasoning_effort ?? null)
+      : (reasoning_effort ?? null);
     const entry = {
       session_id,
       cwd,
       mode,
+      profile: nextProfile,
+      model: nextModel,
+      reasoning_effort: nextEffort,
       created_at: existing?.created_at ?? now,
       last_used_at: now,
       status: 'active',

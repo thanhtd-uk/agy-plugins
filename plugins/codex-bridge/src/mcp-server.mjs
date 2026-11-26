@@ -4,7 +4,7 @@ import { validateExecInput, validateReviewInput } from './validation.mjs';
 
 const SERVER_INFO = {
   name: 'codex-bridge',
-  version: '0.1.0',
+  version: '0.2.1',
 };
 
 export const SUPPORTED_PROTOCOL_VERSIONS = [
@@ -50,10 +50,15 @@ const TOOLS = [
           type: 'string',
           description: 'Resume an existing persisted Codex session_id.',
         },
-        model: { type: 'string', description: 'Optional model slug override (inherits config.toml if omitted).' },
+        profile: {
+          type: 'string',
+          enum: ['fast', 'deep'],
+          description: 'Model tier: "fast" (GPT-6.2 Sol, default) or "deep" (GPT-6.2 Astra). Decoupled from config.toml.',
+        },
+        model: { type: 'string', description: 'Optional raw model slug override (supersedes profile).' },
         reasoning_effort: {
           type: 'string',
-          description: 'Optional effort slug (low, medium, high, xhigh, max, ultra; inherits config.toml if omitted).',
+          description: 'Optional effort slug (low, medium, high, xhigh, max, ultra; defaults to high for fast/deep).',
         },
         wait_sec: { type: 'number', default: 145, description: 'Sync wait budget before returning background job_id (max 150s).' },
         max_runtime_sec: { type: 'number', default: 900, description: 'Hard job timeout in seconds (max 1800s).' },
@@ -76,8 +81,13 @@ const TOOLS = [
         commit: { type: 'string', description: 'Review a specific commit SHA.' },
         title: { type: 'string', description: 'Optional title for the review summary.' },
         prompt: { type: 'string', description: 'Optional custom review instructions.' },
-        model: { type: 'string', description: 'Optional model slug override.' },
-        reasoning_effort: { type: 'string', description: 'Optional effort slug (low..ultra).' },
+        profile: {
+          type: 'string',
+          enum: ['fast', 'deep'],
+          description: 'Model tier: "fast" (GPT-6.2 Sol, default) or "deep" (GPT-6.2 Astra). Decoupled from config.toml.',
+        },
+        model: { type: 'string', description: 'Optional raw model slug override (supersedes profile).' },
+        reasoning_effort: { type: 'string', description: 'Optional effort slug (low..ultra; defaults to high for fast/deep).' },
         wait_sec: { type: 'number', default: 145, description: 'Sync wait budget (max 150s).' },
         max_runtime_sec: { type: 'number', default: 900, description: 'Hard timeout (max 1800s).' },
         max_output_chars: { type: 'number', default: 8500, description: 'Output character cap (500..8500).' },
@@ -151,7 +161,9 @@ export function createBridgeHandler(env = process.env) {
   async function handleToolCall(name, args) {
     try {
       if (name === 'codex_exec') {
-        const spec = validateExecInput(args, env);
+        const sid = typeof args?.session_id === 'string' ? args.session_id.trim() : '';
+        const resumedSession = sid ? sessionStore.getSession(sid) : null;
+        const spec = validateExecInput(args, env, { resumedSession });
         return toolSuccess(await jobManager.startAndWait(spec));
       }
       if (name === 'codex_review') {

@@ -1,8 +1,8 @@
 {
   "name": "codex-bridge",
   "displayName": "Codex Bridge",
-  "version": "0.1.0",
-  "description": "Local Stdio MCP bridge connecting Antigravity Orchestrator with your local Codex CLI for deep analysis, isolated edits, and code reviews.",
+  "version": "0.2.1",
+  "description": "Local Stdio MCP bridge pairing Antigravity Orchestrator with Codex CLI across fast (GPT-6.2 Sol) and deep (GPT-6.2 Astra) tiers for peer collaboration, offload, and code reviews.",
   "logo": "assets/logo.png",
   "author": {
     "name": "cfotel2604",
@@ -11,8 +11,8 @@
   "homepage": "https://github.com/thanhtd-uk/agy-plugins",
   "repository": "https://github.com/thanhtd-uk/agy-plugins",
   "suggestedPrompts": [
-    "Ask Codex to analyze the architecture of this module in read-only mode",
-    "Run a Codex code review on uncommitted changes in this repository",
-    "Delegate a multi-file refactor to Codex in an isolated git worktree and inspect the diff"
+    "Run a quick Codex (Sol fast profile) code review on uncommitted changes in this repository",
+    "Ask Codex (Astra deep profile) to critique the architecture of this module in read-only mode",
+    "/codex-offload Implement this feature with GPT-6.2 Sol while keeping Gemini focused on planning and verification"
   ]
 }

@@ -1,10 +1,15 @@
 # Codex Bridge (`codex_exec`, `codex_review`, `codex_job`, `codex_session`)
 
-Partner with local Codex CLI for second opinions, hard bugs, isolated edits, and reviews.
+Pair with Codex CLI as peer engineers (win-win):
+- **Gemini (Navigator)**: holds intent, picks `focus_files`, runs tests outside Windows sandbox.
+- **Codex (Senior Peer)**: owns scoped work/review, challenges weak assumptions, flags cleaner paths/edge cases.
+- **Goal-first handoff**: pass `cwd`, `focus_files`, goal, constraints in lean English; no micromanagement. Adopt valid pushback or show both trade-offs to user.
 
-- **Call proactively (bounded)**: Call `codex_exec` (`read-only`) before major architecture choices or after 1–2 failed fixes, and `codex_review` (`uncommitted: true`) after large/risky edits. Skip trivial tasks. Cap review loops at 1–2 rounds (fix P0/P1; report P2/P3, do not loop).
-- **Lean English handoff**: Pass absolute `cwd`, `focus_files` (`path[:start-end]`), and brief `context`/`constraints` in concise English (except non-English copy) so Codex reads disk directly; reply in the user's language.
-- **Safe `mode` & Windows tests**: Default `read-only`. Prefer `worktree` in Git repos with commits (review diff before merging); use `workspace-write` for fast edits or non-git/unborn repos. Run test suites yourself outside Codex's Windows sandbox (nested `spawn` hits `EPERM`).
-- **Sessions**: Default ephemeral. Enable `persist_session: true` for multi-turn loops; to resume a worktree, pass `cwd: <worktree.path>` + `workspace-write` (not `worktree`), then clean up via `codex_session`.
-- **Effort**: Omit `model`/`reasoning_effort` to inherit `~/.codex/config.toml` defaults, or pick `low`/`medium` (quick/small), `high` (normal), `xhigh`/`max`/`ultra` (hard).
-- **Jobs (>145s)**: If `status: "running"`, long-poll via `codex_job({ action: "wait", job_id })` instead of tight `status` loops.
+## Profiles (decoupled from `~/.codex/config.toml`; default `high` effort)
+- **`profile: "fast"` (default, GPT-6.2 Sol)**: quick second opinions, routine reviews/edits/tests, `/codex-offload`.
+- **`profile: "deep"` (GPT-6.2 Astra; `xhigh`/`ultra` for hardest bugs)**: major architecture, `/codex-deep`, after 1-2 failed fixes, high-risk reviews.
+
+## Modes, Slash Skills & Fallback
+- **Skills**: `/codex-offload` (Sol `fast`, `workspace-write` routine / `worktree` risky), `/codex-deep` (read-only Astra debate), `/codex-off` (solo AGY, no `codex_*`).
+- **Quota fallback**: if `quota_limited: true`, tell user briefly and continue solo in AGY without retrying.
+- **Safety & sessions**: default `read-only`; `worktree` needs HEAD commit (resume via `worktree.path` + `workspace-write`). Cap reviews at 1-2 rounds; default ephemeral; `persist_session: true` only for loops; wait >145s via `codex_job`.

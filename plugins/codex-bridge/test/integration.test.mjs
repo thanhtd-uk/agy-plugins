@@ -14,9 +14,20 @@ const FAKE_CODEX_PATH = path.join(PLUGIN_ROOT, 'test', 'fixtures', 'fake-codex.m
 
 class McpClient {
   constructor(env) {
+    const cleanEnv = { ...process.env };
+    for (const key of [
+      'CODEX_BRIDGE_MODEL',
+      'CODEX_BRIDGE_DEFAULT_PROFILE',
+      'CODEX_BRIDGE_FAST_MODEL',
+      'CODEX_BRIDGE_FAST_EFFORT',
+      'CODEX_BRIDGE_DEEP_MODEL',
+      'CODEX_BRIDGE_DEEP_EFFORT',
+    ]) {
+      delete cleanEnv[key];
+    }
     this.child = spawn(process.execPath, [SERVER_PATH], {
       cwd: PLUGIN_ROOT,
-      env: { ...process.env, ...env },
+      env: { ...cleanEnv, ...env },
       shell: false,
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -251,6 +262,8 @@ test('MCP integration: full lifecycle over stdio', async () => {
       listRes.result.tools.map((t) => t.name),
       ['codex_exec', 'codex_review', 'codex_job', 'codex_session']
     );
+    assert.deepEqual(listRes.result.tools[0].inputSchema.properties.profile.enum, ['fast', 'deep']);
+    assert.deepEqual(listRes.result.tools[1].inputSchema.properties.profile.enum, ['fast', 'deep']);
 
     const batchRes = await client.requestBatch([
       { jsonrpc: '2.0', id: 901, method: 'ping', params: {} },
@@ -281,11 +294,16 @@ test('MCP integration: full lifecycle over stdio', async () => {
     });
     assert.equal(fast.isError, false);
     assert.equal(fast.data.status, 'completed');
+    assert.equal(fast.data.profile, 'fast');
+    assert.equal(fast.data.model, 'gpt-6.2-sol');
+    assert.equal(fast.data.reasoning_effort, 'high');
     assert.equal(fast.data.session_id, undefined);
     assert.match(fast.data.output, /stdinBytes=/);
     const logs1 = fs.readFileSync(logFile, 'utf8').trim().split(/\r?\n/).map((l) => JSON.parse(l));
     assert.ok(logs1[0].stdinBytes > 12500);
     assert.ok(logs1[0].argv.includes('--ephemeral'));
+    assert.equal(logs1[0].argv[logs1[0].argv.indexOf('-m') + 1], 'gpt-6.2-sol');
+    assert.ok(logs1[0].argv.includes('model_reasoning_effort="high"'));
 
     // 3. Invalid cwd returns isError
     const badCwd = await client.callTool('codex_exec', {
@@ -379,13 +397,17 @@ test('MCP integration: full lifecycle over stdio', async () => {
     assert.equal(huge.data.truncated, true);
     assert.ok(huge.data.output.length <= 1500);
 
-    // 7. Persistent session lifecycle -> resume -> list -> delete
+    // 7. Persistent deep session lifecycle -> resume preserves deep profile/model -> list -> delete
     const persisted = await client.callTool('codex_exec', {
       cwd: sandboxDir,
-      prompt: '[SCENARIO:fast_exec] start session',
+      profile: 'deep',
+      prompt: '[SCENARIO:fast_exec] start deep session',
       persist_session: true,
     });
     assert.equal(persisted.data.status, 'completed');
+    assert.equal(persisted.data.profile, 'deep');
+    assert.equal(persisted.data.model, 'gpt-6.2-astra');
+    assert.equal(persisted.data.reasoning_effort, 'high');
     assert.ok(persisted.data.session_id);
 
     const resumed = await client.callTool('codex_exec', {
@@ -395,9 +417,21 @@ test('MCP integration: full lifecycle over stdio', async () => {
     });
     assert.equal(resumed.data.status, 'completed');
     assert.equal(resumed.data.session_id, persisted.data.session_id);
+    assert.equal(resumed.data.profile, 'deep');
+    assert.equal(resumed.data.model, 'gpt-6.2-astra');
+    assert.equal(resumed.data.reasoning_effort, 'high');
+    const allLogsBeforePersonal = fs
+      .readFileSync(logFile, 'utf8')
+      .trim()
+      .split(/\r?\n/)
+      .map((l) => JSON.parse(l));
+    const resumedArgv = allLogsBeforePersonal.at(-1).argv;
+    assert.equal(resumedArgv[resumedArgv.indexOf('-m') + 1], 'gpt-6.2-astra');
 
     const listed = await client.callTool('codex_session', { action: 'list' });
     assert.equal(listed.data.sessions.length, 1);
+    assert.equal(listed.data.sessions[0].profile, 'deep');
+    assert.equal(listed.data.sessions[0].model, 'gpt-6.2-astra');
 
     const untrackDelete = await client.callTool('codex_session', {
       action: 'delete',
@@ -422,6 +456,14 @@ test('MCP integration: full lifecycle over stdio', async () => {
     });
     assert.equal(resumedPersonal.isError, false);
     assert.equal(resumedPersonal.data.session_id, personalId);
+    assert.equal(resumedPersonal.data.profile, 'inherited');
+    assert.equal(resumedPersonal.data.model, null);
+    const allLogsAfterPersonal = fs
+      .readFileSync(logFile, 'utf8')
+      .trim()
+      .split(/\r?\n/)
+      .map((l) => JSON.parse(l));
+    assert.ok(!allLogsAfterPersonal.at(-1).argv.includes('-m'));
 
     const listedAfterPersonal = await client.callTool('codex_session', { action: 'list' });
     assert.equal(
@@ -443,22 +485,36 @@ test('MCP integration: full lifecycle over stdio', async () => {
     assert.equal(deleted.isError, false);
     assert.equal(deleted.data.status, 'deleted');
 
-    // 8. codex_review pure --uncommitted & target+prompt fallback
+    // 8. codex_review pure --uncommitted & target+prompt fallback with profile metadata
     const rev1 = await client.callTool('codex_review', {
       cwd: sandboxDir,
       uncommitted: true,
     });
     assert.equal(rev1.isError, false);
     assert.equal(rev1.data.status, 'completed');
+    assert.equal(rev1.data.profile, 'fast');
+    assert.equal(rev1.data.model, 'gpt-6.2-sol');
+    assert.equal(rev1.data.reasoning_effort, 'high');
     assert.equal(rev1.data.used_exec_fallback, undefined);
 
     const rev2 = await client.callTool('codex_review', {
       cwd: sandboxDir,
       uncommitted: true,
+      profile: 'deep',
       prompt: '[SCENARIO:fast_exec] check edge cases',
     });
     assert.equal(rev2.isError, false);
+    assert.equal(rev2.data.profile, 'deep');
+    assert.equal(rev2.data.model, 'gpt-6.2-astra');
+    assert.equal(rev2.data.reasoning_effort, 'high');
     assert.equal(rev2.data.used_exec_fallback, true);
+
+    const jobsListed = await client.callTool('codex_job', { action: 'list' });
+    assert.equal(jobsListed.isError, false);
+    assert.ok(Array.isArray(jobsListed.data.jobs) && jobsListed.data.jobs.length > 0);
+    assert.ok('profile' in jobsListed.data.jobs[0]);
+    assert.ok('model' in jobsListed.data.jobs[0]);
+    assert.ok('reasoning_effort' in jobsListed.data.jobs[0]);
 
     // 8b. Windows sandbox policy-block stderr surfaces warning even across chunk splits & >4KB tail
     const blocked = await client.callTool('codex_exec', {

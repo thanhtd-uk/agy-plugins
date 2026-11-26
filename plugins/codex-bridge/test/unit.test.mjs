@@ -16,6 +16,11 @@ import {
   startCodexRun,
 } from '../src/codex-runner.mjs';
 import {
+  DEFAULT_DEEP_EFFORT,
+  DEFAULT_DEEP_MODEL,
+  DEFAULT_FAST_EFFORT,
+  DEFAULT_FAST_MODEL,
+  getProfileConfig,
   resolveCodexBinary,
   resolveGitBinary,
   resolvePowershellBinary,
@@ -26,7 +31,7 @@ import {
   composeExecPrompt,
   truncateOutput,
 } from '../src/handoff.mjs';
-import { JobManager, detectPolicyBlockWarning } from '../src/job-manager.mjs';
+import { JobManager, detectPolicyBlockWarning, detectQuotaLimitWarning } from '../src/job-manager.mjs';
 import { SessionStore } from '../src/session-store.mjs';
 import { validateCwd, validateExecInput, validateReviewInput } from '../src/validation.mjs';
 import { cmdUninstall, copyRuntimeFiles, isBlockingFinding, validateInstallTarget } from '../scripts/install.mjs';
@@ -113,12 +118,13 @@ test('validateExecInput enforces mode safety, worktree git HEAD, and flexible ef
     assert.equal(wtSpec.mode, 'worktree');
     assert.equal(wtSpec.skipGitRepoCheck, false);
 
-    const nonGitSpec = validateExecInput({ cwd: nonGitDir, prompt: 'analyze' });
+    const nonGitSpec = validateExecInput({ cwd: nonGitDir, prompt: 'analyze' }, {});
     assert.equal(nonGitSpec.mode, 'read-only');
     assert.equal(nonGitSpec.persist_session, false);
     assert.equal(nonGitSpec.skipGitRepoCheck, true);
-    assert.equal(nonGitSpec.model, null);
-    assert.equal(nonGitSpec.reasoning_effort, null);
+    assert.equal(nonGitSpec.profile, 'fast');
+    assert.equal(nonGitSpec.model, DEFAULT_FAST_MODEL);
+    assert.equal(nonGitSpec.reasoning_effort, DEFAULT_FAST_EFFORT);
 
     for (const effort of ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']) {
       const spec = validateExecInput({
@@ -149,12 +155,13 @@ test('buildCodexExecArgs & buildCodexReviewInvocation produce valid clap flag or
     initGitRepo(gitDir, true);
 
     const canonicalGitDir = fs.realpathSync.native(gitDir);
-    const ephemeralSpec = validateExecInput({ cwd: gitDir, prompt: 'inspect' });
+    const ephemeralSpec = validateExecInput({ cwd: gitDir, prompt: 'inspect' }, {});
     const ephemeralArgs = buildCodexExecArgs(ephemeralSpec, 'C:\\tmp\\out.txt');
     assert.deepEqual(ephemeralArgs.slice(0, 6), ['exec', '-C', canonicalGitDir, '-s', 'read-only', '--ephemeral']);
     assert.equal(ephemeralArgs.at(-1), '-');
-    assert.ok(!ephemeralArgs.includes('-m'));
-    assert.ok(!ephemeralArgs.includes('-c'));
+    assert.ok(ephemeralArgs.includes('-m'));
+    assert.equal(ephemeralArgs[ephemeralArgs.indexOf('-m') + 1], DEFAULT_FAST_MODEL);
+    assert.ok(ephemeralArgs.includes(`model_reasoning_effort="${DEFAULT_FAST_EFFORT}"`));
 
     const resumeSpec = validateExecInput({
       cwd: gitDir,
@@ -653,6 +660,9 @@ test('validateInstallTarget & copyRuntimeFiles guard against unrelated directori
     copyRuntimeFiles(srcRoot, freshTarget);
     assert.ok(fs.existsSync(path.join(freshTarget, 'plugin.json')));
     assert.ok(fs.existsSync(path.join(freshTarget, 'assets', 'logo.png')));
+    assert.ok(fs.existsSync(path.join(freshTarget, 'skills', 'codex-offload', 'SKILL.md')));
+    assert.ok(fs.existsSync(path.join(freshTarget, 'skills', 'codex-off', 'SKILL.md')));
+    assert.ok(fs.existsSync(path.join(freshTarget, 'skills', 'codex-deep', 'SKILL.md')));
     assert.equal(isBlockingFinding({ severity: 'note', message: 'optional hint' }), false);
     assert.equal(isBlockingFinding({ severity: 'info', message: 'informational' }), false);
     assert.equal(isBlockingFinding({ severity: 'warning', message: 'warn' }), true);
@@ -2157,6 +2167,215 @@ test('JobManager enforces max_runtime_sec on late exit, stale cancel race, exhau
       max_runtime_sec: 0.02,
     });
     assert.equal(job2Final.status, 'timed_out');
+  } finally {
+    fs.rmSync(workDir, { recursive: true, force: true });
+  }
+});
+
+test('two-tier profile resolution, env overrides, raw model precedence, and resume preservation', () => {
+  const workDir = makeTempDir('cb-profile-');
+  try {
+    const defaultCfg = getProfileConfig({});
+    assert.equal(defaultCfg.defaultProfile, 'fast');
+    assert.equal(defaultCfg.fast.model, DEFAULT_FAST_MODEL);
+    assert.equal(defaultCfg.fast.reasoning_effort, DEFAULT_FAST_EFFORT);
+    assert.equal(defaultCfg.deep.model, DEFAULT_DEEP_MODEL);
+    assert.equal(defaultCfg.deep.reasoning_effort, DEFAULT_DEEP_EFFORT);
+
+    assert.throws(
+      () => getProfileConfig({ CODEX_BRIDGE_DEFAULT_PROFILE: 'turbo' }),
+      /Invalid CODEX_BRIDGE_DEFAULT_PROFILE/i
+    );
+
+    const deepSpec = validateExecInput({ cwd: workDir, prompt: 'arch critique', profile: 'DEEP' }, {});
+    assert.equal(deepSpec.profile, 'deep');
+    assert.equal(deepSpec.model, DEFAULT_DEEP_MODEL);
+    assert.equal(deepSpec.reasoning_effort, DEFAULT_DEEP_EFFORT);
+
+    const customOverrideSpec = validateExecInput(
+      {
+        cwd: workDir,
+        prompt: 'custom model',
+        profile: 'fast',
+        model: 'gpt-6.3-preview',
+      },
+      {}
+    );
+    assert.equal(customOverrideSpec.profile, 'custom');
+    assert.equal(customOverrideSpec.model, 'gpt-6.3-preview');
+    assert.equal(customOverrideSpec.reasoning_effort, DEFAULT_FAST_EFFORT);
+
+    const explicitEffortBypassesBadProfileEffort = validateExecInput(
+      {
+        cwd: workDir,
+        prompt: 'custom model explicit effort',
+        profile: 'fast',
+        model: 'gpt-6.3-preview',
+        reasoning_effort: 'medium',
+      },
+      { CODEX_BRIDGE_FAST_EFFORT: 'not a slug' }
+    );
+    assert.equal(explicitEffortBypassesBadProfileEffort.profile, 'custom');
+    assert.equal(explicitEffortBypassesBadProfileEffort.model, 'gpt-6.3-preview');
+    assert.equal(explicitEffortBypassesBadProfileEffort.reasoning_effort, 'medium');
+
+    const envOverrideSpec = validateExecInput(
+      { cwd: workDir, prompt: 'env defaults' },
+      {
+        CODEX_BRIDGE_DEFAULT_PROFILE: 'deep',
+        CODEX_BRIDGE_DEEP_MODEL: 'gpt-6.2-astra-custom',
+        CODEX_BRIDGE_DEEP_EFFORT: 'xhigh',
+      }
+    );
+    assert.equal(envOverrideSpec.profile, 'deep');
+    assert.equal(envOverrideSpec.model, 'gpt-6.2-astra-custom');
+    assert.equal(envOverrideSpec.reasoning_effort, 'xhigh');
+
+    const legacyEnvSpec = validateExecInput(
+      { cwd: workDir, prompt: 'legacy env' },
+      { CODEX_BRIDGE_MODEL: 'gpt-6.1-sol' }
+    );
+    assert.equal(legacyEnvSpec.profile, 'custom');
+    assert.equal(legacyEnvSpec.model, 'gpt-6.1-sol');
+    assert.equal(legacyEnvSpec.reasoning_effort, null);
+
+    assert.throws(
+      () => validateExecInput({ cwd: workDir, prompt: 'bad', profile: 'turbo' }, {}),
+      /Invalid "profile"/i
+    );
+
+    // Resume tracked session preserves saved deep profile/model/effort unless overridden
+    const trackedResume = validateExecInput(
+      { cwd: workDir, prompt: 'follow up', session_id: '11111111-2222-4333-8444-555555555555' },
+      {},
+      {
+        resumedSession: {
+          session_id: '11111111-2222-4333-8444-555555555555',
+          profile: 'deep',
+          model: 'gpt-6.2-astra',
+          reasoning_effort: 'xhigh',
+        },
+      }
+    );
+    assert.equal(trackedResume.profile, 'deep');
+    assert.equal(trackedResume.model, 'gpt-6.2-astra');
+    assert.equal(trackedResume.reasoning_effort, 'xhigh');
+
+    // Resume legacy tracked session with saved effort but null model preserves effort without forcing -m
+    const legacyTrackedEffortResume = validateExecInput(
+      { cwd: workDir, prompt: 'legacy follow up', session_id: '11111111-2222-4333-8444-555555555555' },
+      {},
+      {
+        resumedSession: {
+          session_id: '11111111-2222-4333-8444-555555555555',
+          profile: null,
+          model: null,
+          reasoning_effort: 'xhigh',
+        },
+      }
+    );
+    assert.equal(legacyTrackedEffortResume.profile, 'inherited');
+    assert.equal(legacyTrackedEffortResume.model, null);
+    assert.equal(legacyTrackedEffortResume.reasoning_effort, 'xhigh');
+
+    // Resume untracked session without profile/model omits -m (profile: 'inherited', model: null)
+    const untrackedResume = validateExecInput(
+      { cwd: workDir, prompt: 'personal follow up', session_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee' },
+      {},
+      { resumedSession: null }
+    );
+    assert.equal(untrackedResume.profile, 'inherited');
+    assert.equal(untrackedResume.model, null);
+    const untrackedArgs = buildCodexExecArgs(untrackedResume, 'C:\\tmp\\out.txt');
+    assert.ok(!untrackedArgs.includes('-m'));
+
+    // Win-Win peer handoff framing
+    const execPrompt = composeExecPrompt({ prompt: 'Refactor module', mode: 'workspace-write' });
+    assert.match(execPrompt, /peer engineer/i);
+    assert.match(execPrompt, /trade-offs or edge cases/i);
+
+    const reviewPrompt = composeCustomTargetReviewPrompt({
+      uncommitted: true,
+      prompt: 'Check concurrency',
+    });
+    assert.match(reviewPrompt, /independent senior peer/i);
+    assert.match(reviewPrompt, /challenge risky assumptions/i);
+  } finally {
+    fs.rmSync(workDir, { recursive: true, force: true });
+  }
+});
+
+test('detectQuotaLimitWarning & JobManager flag failed quota-limited runs without false-positiving on completed runs', async () => {
+  assert.match(
+    detectQuotaLimitWarning('ERROR: 429 Too Many Requests: usage limit reached', '') || '',
+    /quota or rate limit/i
+  );
+  assert.equal(detectQuotaLimitWarning('SyntaxError: unexpected token', ''), null);
+
+  const workDir = makeTempDir('cb-quota-');
+  try {
+    const baseEnv = {
+      ...process.env,
+      CODEX_BRIDGE_TEST_MODE: '1',
+      CODEX_BRIDGE_BIN: process.execPath,
+    };
+
+    const failManager = new JobManager({
+      sessionStore: { recordSession: () => {} },
+      env: baseEnv,
+      startRun: () => ({
+        pid: 400001,
+        getProgress: () => ({ events_count: 1, last_event: 'error' }),
+        cancel: async () => ({ ok: true }),
+        donePromise: Promise.resolve({
+          exitCode: 1,
+          signal: null,
+          spawnError: null,
+          output: '',
+          stderr: 'OpenAI API error: rate limit exceeded (429)',
+          policyBlocked: false,
+          session_id: null,
+          usage: null,
+          worktree: null,
+          usedExecFallback: false,
+        }),
+      }),
+    });
+    const failedRes = await failManager.startAndWait(
+      validateExecInput({ cwd: workDir, prompt: 'test quota fail' }, {})
+    );
+    assert.equal(failedRes.status, 'failed');
+    assert.equal(failedRes.quota_limited, true);
+    assert.ok(Array.isArray(failedRes.warnings));
+    assert.match(failedRes.warnings[0], /continue solo in Antigravity/i);
+
+    const okManager = new JobManager({
+      sessionStore: { recordSession: () => {} },
+      env: baseEnv,
+      startRun: () => ({
+        pid: 400002,
+        getProgress: () => ({ events_count: 1, last_event: 'turn.completed' }),
+        cancel: async () => ({ ok: true }),
+        donePromise: Promise.resolve({
+          exitCode: 0,
+          signal: null,
+          spawnError: null,
+          output: 'Reviewed HTTP 429 rate limit middleware cleanly.',
+          stderr: '',
+          policyBlocked: false,
+          session_id: null,
+          usage: null,
+          worktree: null,
+          usedExecFallback: false,
+        }),
+      }),
+    });
+    const okRes = await okManager.startAndWait(
+      validateExecInput({ cwd: workDir, prompt: 'review 429 handler' }, {})
+    );
+    assert.equal(okRes.status, 'completed');
+    assert.equal(okRes.quota_limited, undefined);
+    assert.equal(okRes.warnings, undefined);
   } finally {
     fs.rmSync(workDir, { recursive: true, force: true });
   }

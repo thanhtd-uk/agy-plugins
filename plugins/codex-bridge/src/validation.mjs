@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  ALLOWED_PROFILES,
   DEFAULT_MAX_OUTPUT_CHARS,
   DEFAULT_MAX_RUNTIME_SEC,
   DEFAULT_WAIT_SEC,
@@ -9,11 +10,12 @@ import {
   MAX_MAX_OUTPUT_CHARS,
   MAX_WAIT_SEC,
   MIN_MAX_OUTPUT_CHARS,
-  getDefaultModel,
+  getProfileConfig,
   isTestMode,
   resolveGitBinary,
 } from './config.mjs';
 
+export { ALLOWED_PROFILES };
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const SESSION_ID_RE = /^[a-zA-Z0-9._-]{1,128}$/;
 export const EFFORT_RE = /^[a-z0-9_-]{1,24}$/i;
@@ -120,16 +122,42 @@ function validateOptionalString(value, name, maxLen = 32000) {
   return trimmed;
 }
 
-function validateModelAndEffort(raw, env) {
-  let model = getDefaultModel(env);
+function assertModelSlug(value, label) {
+  if (typeof value !== 'string' || !MODEL_RE.test(value)) {
+    throw new Error(`Invalid ${label} slug.`);
+  }
+  return value;
+}
+
+function assertEffortSlug(value, label) {
+  if (typeof value !== 'string' || !EFFORT_RE.test(value)) {
+    throw new Error(`Invalid ${label} slug.`);
+  }
+  return value;
+}
+
+function validateModelAndEffort(raw, env, { isResume = false, resumedSession = null } = {}) {
+  let explicitProfile = null;
+  if (raw.profile !== undefined && raw.profile !== null && String(raw.profile).trim() !== '') {
+    if (typeof raw.profile !== 'string') {
+      throw new Error('Invalid "profile": must be a string ("fast" or "deep").');
+    }
+    const normalized = raw.profile.trim().toLowerCase();
+    if (!ALLOWED_PROFILES.has(normalized)) {
+      throw new Error(`Invalid "profile": "${raw.profile}". Allowed values are "fast" or "deep".`);
+    }
+    explicitProfile = normalized;
+  }
+
+  let explicitModel = null;
   if (raw.model !== undefined && raw.model !== null && String(raw.model).trim() !== '') {
     if (typeof raw.model !== 'string' || !MODEL_RE.test(raw.model.trim())) {
       throw new Error('Invalid "model" slug.');
     }
-    model = raw.model.trim();
+    explicitModel = raw.model.trim();
   }
 
-  let reasoning_effort = null;
+  let explicitEffort = null;
   if (
     raw.reasoning_effort !== undefined &&
     raw.reasoning_effort !== null &&
@@ -138,10 +166,72 @@ function validateModelAndEffort(raw, env) {
     if (typeof raw.reasoning_effort !== 'string' || !EFFORT_RE.test(raw.reasoning_effort.trim())) {
       throw new Error('Invalid "reasoning_effort" slug.');
     }
-    reasoning_effort = raw.reasoning_effort.trim();
+    explicitEffort = raw.reasoning_effort.trim();
   }
 
-  return { model, reasoning_effort };
+  const cfg = getProfileConfig(env);
+
+  if (explicitModel) {
+    const resolvedEffort =
+      explicitEffort ??
+      (explicitProfile
+        ? assertEffortSlug(cfg[explicitProfile].reasoning_effort, `"${explicitProfile}" effort`)
+        : null);
+    return {
+      profile: 'custom',
+      model: explicitModel,
+      reasoning_effort: resolvedEffort,
+    };
+  }
+
+  if (explicitProfile) {
+    const target = cfg[explicitProfile];
+    return {
+      profile: explicitProfile,
+      model: assertModelSlug(target.model, `"${explicitProfile}" model`),
+      reasoning_effort:
+        explicitEffort ?? assertEffortSlug(target.reasoning_effort, `"${explicitProfile}" effort`),
+    };
+  }
+
+  if (isResume) {
+    const savedEffort =
+      resumedSession?.reasoning_effort && EFFORT_RE.test(resumedSession.reasoning_effort)
+        ? resumedSession.reasoning_effort
+        : null;
+    if (resumedSession?.model && MODEL_RE.test(resumedSession.model)) {
+      const savedProfile = ALLOWED_PROFILES.has(resumedSession.profile)
+        ? resumedSession.profile
+        : 'custom';
+      return {
+        profile: savedProfile,
+        model: resumedSession.model,
+        reasoning_effort: explicitEffort ?? savedEffort,
+      };
+    }
+    return {
+      profile: 'inherited',
+      model: null,
+      reasoning_effort: explicitEffort ?? savedEffort,
+    };
+  }
+
+  if (cfg.legacyModel) {
+    return {
+      profile: 'custom',
+      model: assertModelSlug(cfg.legacyModel, 'CODEX_BRIDGE_MODEL'),
+      reasoning_effort: explicitEffort ?? null,
+    };
+  }
+
+  const defaultTarget = cfg[cfg.defaultProfile];
+  return {
+    profile: cfg.defaultProfile,
+    model: assertModelSlug(defaultTarget.model, `"${cfg.defaultProfile}" model`),
+    reasoning_effort:
+      explicitEffort ??
+      assertEffortSlug(defaultTarget.reasoning_effort, `"${cfg.defaultProfile}" effort`),
+  };
 }
 
 function validateTimingAndBudget(raw, env) {
@@ -169,7 +259,7 @@ function validateTimingAndBudget(raw, env) {
 }
 
 /** Validates and normalizes arguments for `codex_exec`. */
-export function validateExecInput(raw, env = process.env) {
+export function validateExecInput(raw, env = process.env, options = {}) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new Error('Tool arguments must be a JSON object.');
   }
@@ -237,7 +327,10 @@ export function validateExecInput(raw, env = process.env) {
   const isResume = Boolean(session_id);
   const persist_session = isResume ? true : Boolean(raw.persist_session ?? false);
 
-  const { model, reasoning_effort } = validateModelAndEffort(raw, env);
+  const { profile, model, reasoning_effort } = validateModelAndEffort(raw, env, {
+    isResume,
+    resumedSession: options.resumedSession ?? null,
+  });
   const { wait_sec, max_runtime_sec, max_output_chars } = validateTimingAndBudget(raw, env);
 
   return {
@@ -255,6 +348,7 @@ export function validateExecInput(raw, env = process.env) {
     session_id,
     isResume,
     persist_session,
+    profile,
     model,
     reasoning_effort,
     wait_sec,
@@ -300,7 +394,7 @@ export function validateReviewInput(raw, env = process.env) {
     uncommitted = true;
   }
 
-  const { model, reasoning_effort } = validateModelAndEffort(raw, env);
+  const { profile, model, reasoning_effort } = validateModelAndEffort(raw, env);
   const { wait_sec, max_runtime_sec, max_output_chars } = validateTimingAndBudget(raw, env);
 
   return {
@@ -314,6 +408,7 @@ export function validateReviewInput(raw, env = process.env) {
     commit,
     title,
     prompt,
+    profile,
     model,
     reasoning_effort,
     wait_sec,

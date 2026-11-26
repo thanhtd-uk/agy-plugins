@@ -34,11 +34,14 @@ export function composeExecPrompt({
   }
 
   const budgetNotes = [
+    'Work as a peer engineer: if you spot flawed assumptions, hidden risks, or a simpler/cleaner path, flag them concisely alongside or before your solution.',
     'Respond in concise technical English unless the task requires another language.',
     `Keep your final response concise and under ~${max_output_chars} characters.`,
   ];
   if (mode === 'worktree' || mode === 'workspace-write') {
-    budgetNotes.push('List modified files and any verification commands/results clearly.');
+    budgetNotes.push(
+      'List modified files, verification commands/results, and any key trade-offs or edge cases clearly.'
+    );
   }
   sections.push(`# Output Budget\n${budgetNotes.join(' ')}`);
 
@@ -76,7 +79,7 @@ export function composeCustomTargetReviewPrompt({
   }
 
   sections.push(
-    `# Output Budget\nRespond in concise technical English unless asked otherwise. Report findings by severity with exact file paths/line numbers and concise fixes. Keep your final response under ~${max_output_chars} characters.`
+    `# Output Budget\nReview as an independent senior peer: challenge risky assumptions, report findings by severity with exact file paths/line numbers, and propose concise fixes or cleaner alternatives. Respond in concise technical English unless asked otherwise, under ~${max_output_chars} characters.`
   );
 
   return sections.join('\n\n') + '\n';

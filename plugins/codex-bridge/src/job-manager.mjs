@@ -39,6 +39,18 @@ export function detectPolicyBlockWarning(stderr, policyBlocked = false) {
   return null;
 }
 
+const QUOTA_LIMIT_RE =
+  /\b(?:usage\s+limit|rate\s+limit(?:ed)?|quota\s+exceeded|too\s+many\s+requests|insufficient_quota|429)\b/i;
+
+/** Detects Codex CLI quota or rate-limit failures so Orchestrator can switch solo cleanly. */
+export function detectQuotaLimitWarning(stderr = '', output = '') {
+  const combined = `${stderr || ''}\n${output || ''}`;
+  if (QUOTA_LIMIT_RE.test(combined)) {
+    return 'Codex CLI hit a quota or rate limit. Inform the user briefly, do not retry Codex, and continue solo in Antigravity for this session.';
+  }
+  return null;
+}
+
 /**
  * Coordinates synchronous-with-background-fallback Codex jobs, concurrency limits,
  * per-cwd workspace-write locks, and clean process-tree cancellation.
@@ -97,6 +109,9 @@ export class JobManager {
         pid: job.run.pid ?? null,
         kind: job.spec.kind,
         mode: job.spec.mode,
+        profile: job.spec.profile,
+        model: job.spec.model,
+        reasoning_effort: job.spec.reasoning_effort,
         cwd: job.spec.cwd,
         elapsed_sec,
         max_runtime_sec: job.spec.max_runtime_sec,
@@ -112,6 +127,9 @@ export class JobManager {
       job_id: job.job_id,
       kind: job.spec.kind,
       mode: job.spec.mode,
+      profile: job.spec.profile,
+      model: job.spec.model,
+      reasoning_effort: job.spec.reasoning_effort,
       cwd: job.spec.cwd,
       elapsed_sec,
       progress: job.run.getProgress(),
@@ -312,6 +330,9 @@ export class JobManager {
             session_id: returnedSessionId,
             cwd: spec.cwd,
             mode: spec.mode,
+            profile: spec.profile,
+            model: spec.model,
+            reasoning_effort: spec.reasoning_effort,
             summary: spec.prompt,
             onlyIfTracked: Boolean(spec.isResume),
           });
@@ -327,6 +348,11 @@ export class JobManager {
         finalStatus === 'completed' ? detectPolicyBlockWarning(res.stderr, res.policyBlocked) : null;
       if (policyWarning) {
         warnings.push(policyWarning);
+      }
+      const quotaWarning =
+        finalStatus === 'failed' ? detectQuotaLimitWarning(res.stderr, output) : null;
+      if (quotaWarning) {
+        warnings.push(quotaWarning);
       }
       if (res.worktreeWarning) {
         warnings.push(res.worktreeWarning);
@@ -356,6 +382,9 @@ export class JobManager {
         job_id,
         kind: spec.kind,
         mode: spec.mode,
+        profile: spec.profile,
+        model: spec.model,
+        reasoning_effort: spec.reasoning_effort,
         cwd: spec.cwd,
         elapsed_sec,
         exit_code: res.exitCode,
@@ -363,6 +392,7 @@ export class JobManager {
         ...(res.worktree ? { worktree: res.worktree } : {}),
         ...(res.usage ? { usage: res.usage } : {}),
         ...(res.usedExecFallback ? { used_exec_fallback: true } : {}),
+        ...(quotaWarning ? { quota_limited: true } : {}),
         ...(warnings.length > 0 ? { warnings } : {}),
         output,
         truncated,
@@ -526,6 +556,9 @@ export class JobManager {
       pid: job.run.pid ?? null,
       kind: job.spec.kind,
       mode: job.spec.mode,
+      profile: job.spec.profile,
+      model: job.spec.model,
+      reasoning_effort: job.spec.reasoning_effort,
       cwd: job.spec.cwd,
       error: `Failed to terminate Codex process (pid=${job.run.pid ?? 'unknown'}): ${job.lastCancelError || 'cancellation timed out or process did not exit within grace period'}. Concurrency slot and write lock remain held until the process exits.`,
     };
@@ -540,6 +573,9 @@ export class JobManager {
       ...(job.timedOut && job.status === 'running' ? { timed_out: true } : {}),
       kind: job.spec.kind,
       mode: job.spec.mode,
+      profile: job.spec.profile,
+      model: job.spec.model,
+      reasoning_effort: job.spec.reasoning_effort,
       cwd: job.spec.cwd,
       elapsed_sec: Number(
         (((job.finishedAtMs ?? Date.now()) - job.startedAtMs) / 1000).toFixed(1)
