@@ -13,6 +13,6 @@
   "suggestedPrompts": [
     "Run a quick Codex (Sol fast profile) code review on uncommitted changes in this repository",
     "Ask Codex (Astra deep profile) to critique the architecture of this module in read-only mode",
-    "/codex-offload Implement this feature with GPT-6.2 Sol while keeping Gemini focused on planning and verification"
+    "/codex-offload Offload execution to Codex (fast/deep or custom model) while Gemini plans and verifies"
   ]
 }
