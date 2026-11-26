@@ -1,0 +1,17 @@
+{
+  "name": "codex-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Local Stdio MCP bridge connecting Antigravity Orchestrator with local Codex CLI",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "install:plugin": "node scripts/install.mjs install",
+    "doctor": "node scripts/install.mjs doctor",
+    "uninstall:plugin": "node scripts/install.mjs uninstall"
+  }
+}

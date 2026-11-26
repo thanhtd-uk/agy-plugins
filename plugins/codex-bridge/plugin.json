@@ -1,0 +1,17 @@
+{
+  "name": "codex-bridge",
+  "displayName": "Codex Bridge",
+  "version": "0.1.0",
+  "description": "Local Stdio MCP bridge connecting Antigravity Orchestrator with your local Codex CLI for deep analysis, isolated edits, and code reviews.",
+  "author": {
+    "name": "cfotel2604",
+    "url": "https://github.com/cfotel2604"
+  },
+  "homepage": "https://github.com/thanhtd-uk/agy-plugins",
+  "repository": "https://github.com/thanhtd-uk/agy-plugins",
+  "suggestedPrompts": [
+    "Ask Codex to analyze the architecture of this module in read-only mode",
+    "Run a Codex code review on uncommitted changes in this repository",
+    "Delegate a multi-file refactor to Codex in an isolated git worktree and inspect the diff"
+  ]
+}

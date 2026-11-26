@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "cli": {
+      "command": "node",
+      "args": [
+        "${PLUGIN_ROOT}/src/mcp-server.mjs"
+      ],
+      "tools": {
+        "codex_exec": {
+          "eager": true
+        },
+        "codex_review": {
+          "eager": true
+        },
+        "codex_job": {
+          "eager": true
+        },
+        "codex_session": {
+          "eager": true
+        }
+      }
+    }
+  }
+}
