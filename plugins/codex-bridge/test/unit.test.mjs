@@ -659,7 +659,7 @@ test('validateInstallTarget & copyRuntimeFiles guard against unrelated directori
     const freshTarget = path.join(tmpDir, 'fresh-codex-bridge');
     copyRuntimeFiles(srcRoot, freshTarget);
     assert.ok(fs.existsSync(path.join(freshTarget, 'plugin.json')));
-    assert.ok(fs.existsSync(path.join(freshTarget, 'assets', 'logo.svg')));
+    assert.ok(fs.existsSync(path.join(freshTarget, 'assets', 'logo.png')));
     assert.ok(fs.existsSync(path.join(freshTarget, 'skills', 'codex-offload', 'SKILL.md')));
     assert.ok(fs.existsSync(path.join(freshTarget, 'skills', 'codex-off', 'SKILL.md')));
     assert.ok(fs.existsSync(path.join(freshTarget, 'skills', 'codex-deep', 'SKILL.md')));

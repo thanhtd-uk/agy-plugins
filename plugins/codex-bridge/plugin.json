@@ -3,7 +3,7 @@
   "displayName": "Codex Bridge",
   "version": "0.2.1",
   "description": "Local Stdio MCP bridge pairing Antigravity Orchestrator with Codex CLI across fast (GPT-6.2 Sol) and deep (GPT-6.2 Astra) tiers for peer collaboration, offload, and code reviews.",
-  "logo": "assets/logo.svg",
+  "logo": "assets/logo.png",
   "author": {
     "name": "cfotel2604",
     "url": "https://github.com/cfotel2604"
