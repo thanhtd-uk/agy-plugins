@@ -1292,3 +1292,227 @@ test('JobManager preserves personal session ownership on resume and returns outp
     fs.rmSync(workDir, { recursive: true, force: true });
   }
 });
+
+test('JobManager max_runtime_sec retries failed timeout cancel and preserves timed_out status on late zero exit', async () => {
+  const workDir = makeTempDir('cb-timeout-retry-');
+  const fakeCodexPath = FAKE_CODEX_PATH;
+  const recordedSessions = [];
+  let runIndex = 0;
+  let retryCancelCalls = 0;
+  let persistentCancelCalls = 0;
+  let releasePersistent;
+
+  try {
+    const manager = new JobManager({
+      sessionStore: {
+        recordSession: (entry) => recordedSessions.push(entry),
+      },
+      env: {
+        ...process.env,
+        CODEX_BRIDGE_TEST_MODE: '1',
+        CODEX_BRIDGE_BIN: process.execPath,
+        CODEX_BRIDGE_BIN_ARGS_PREFIX: JSON.stringify([fakeCodexPath]),
+      },
+      cancelGraceMs: 25,
+      startRun: () => {
+        runIndex += 1;
+        if (runIndex === 1) {
+          // Job 1: first timeout cancel fails, second retry kills the process cleanly.
+          let release1;
+          return {
+            pid: 200001,
+            getProgress: () => ({ events_count: 1, last_event: 'turn.started' }),
+            cancel: async () => {
+              retryCancelCalls += 1;
+              if (retryCancelCalls === 1) {
+                return { ok: false, error: 'transient taskkill failure' };
+              }
+              setTimeout(() => {
+                release1({
+                  exitCode: 1,
+                  signal: 'SIGTERM',
+                  spawnError: null,
+                  output: '',
+                  stderr: '',
+                  policyBlocked: false,
+                  session_id: 'sess-retry',
+                  usage: null,
+                  worktree: null,
+                  usedExecFallback: false,
+                });
+              }, 5);
+              return { ok: true, method: 'taskkill' };
+            },
+            donePromise: new Promise((resolve) => {
+              release1 = resolve;
+            }),
+          };
+        }
+        // Job 2: all timeout cancel attempts fail; process later exits with code 0.
+        return {
+          pid: 200002,
+          getProgress: () => ({ events_count: 1, last_event: 'turn.started' }),
+          cancel: async () => {
+            persistentCancelCalls += 1;
+            return { ok: false, error: 'Access denied' };
+          },
+          donePromise: new Promise((resolve) => {
+            releasePersistent = resolve;
+          }),
+        };
+      },
+    });
+
+    const spec1 = {
+      ...validateExecInput(
+        { cwd: workDir, mode: 'workspace-write', prompt: 'timeout-retry', wait_sec: 0.05, persist_session: true },
+        { ...process.env, CODEX_BRIDGE_TEST_MODE: '1' }
+      ),
+      max_runtime_sec: 0.02,
+    };
+    const res1 = await manager.startAndWait(spec1);
+    const final1 = res1.status === 'running' ? await manager.waitJob(res1.job_id, 1) : res1;
+    assert.equal(final1.status, 'timed_out');
+    assert.equal(retryCancelCalls, 2);
+
+    const spec2 = {
+      ...validateExecInput(
+        { cwd: workDir, mode: 'workspace-write', prompt: 'timeout-late-exit', wait_sec: 0.05, persist_session: true },
+        { ...process.env, CODEX_BRIDGE_TEST_MODE: '1' }
+      ),
+      max_runtime_sec: 0.02,
+    };
+    const started2 = await manager.startAndWait(spec2);
+    assert.equal(started2.status, 'running');
+
+    // Wait long enough for all 3 bounded timeout cancel attempts to complete.
+    await new Promise((r) => setTimeout(r, 250));
+    assert.equal(persistentCancelCalls, 3);
+    assert.equal(manager.getJobStatus(started2.job_id).status, 'running');
+
+    // Write lock remains held while the OS process has not exited.
+    await assert.rejects(() => manager.startAndWait(spec2), /already running/i);
+
+    // Late natural exit with code 0 must still be reported as 'timed_out', never 'completed'.
+    releasePersistent({
+      exitCode: 0,
+      signal: null,
+      spawnError: null,
+      output: 'late zero exit',
+      stderr: '',
+      policyBlocked: false,
+      session_id: 'sess-late',
+      usage: null,
+      worktree: null,
+      usedExecFallback: false,
+    });
+    const final2 = await manager.waitJob(started2.job_id, 1);
+    assert.equal(final2.status, 'timed_out');
+    assert.equal(recordedSessions.length, 0);
+
+    // Job 3: child has already exited while pipes are still draining; timeout must not retry PID kill.
+    let exitedJobCancelCalls = 0;
+    let exitedFlag = false;
+    let releaseExited;
+    const exitedManager = new JobManager({
+      sessionStore: { recordSession: () => {} },
+      env: {
+        ...process.env,
+        CODEX_BRIDGE_TEST_MODE: '1',
+        CODEX_BRIDGE_BIN: process.execPath,
+        CODEX_BRIDGE_BIN_ARGS_PREFIX: JSON.stringify([fakeCodexPath]),
+      },
+      cancelGraceMs: 25,
+      startRun: () => ({
+        pid: 200003,
+        hasExited: () => exitedFlag,
+        getProgress: () => ({ events_count: 1, last_event: 'turn.started' }),
+        cancel: async () => {
+          exitedJobCancelCalls += 1;
+          exitedFlag = true;
+          return { ok: false, error: 'transient failure while exiting' };
+        },
+        donePromise: new Promise((resolve) => {
+          releaseExited = resolve;
+        }),
+      }),
+    });
+    const spec3 = {
+      ...validateExecInput(
+        { cwd: workDir, mode: 'workspace-write', prompt: 'timeout-exited-child', wait_sec: 0.05 },
+        { ...process.env, CODEX_BRIDGE_TEST_MODE: '1' }
+      ),
+      max_runtime_sec: 0.02,
+    };
+    const started3 = await exitedManager.startAndWait(spec3);
+    assert.equal(started3.status, 'running');
+    await new Promise((r) => setTimeout(r, 140));
+    assert.equal(exitedJobCancelCalls, 1);
+    releaseExited({
+      exitCode: 0,
+      signal: null,
+      spawnError: null,
+      output: '',
+      stderr: '',
+      policyBlocked: false,
+      session_id: null,
+      usage: null,
+      worktree: null,
+      usedExecFallback: false,
+    });
+    assert.equal((await exitedManager.waitJob(started3.job_id, 1)).status, 'timed_out');
+
+    // Job 4: shutdownAll() clears queued timeout retries and prevents post-shutdown cancel calls.
+    let shutdownCancelCalls = 0;
+    let releaseShutdown;
+    const shutdownRetryManager = new JobManager({
+      sessionStore: { recordSession: () => {} },
+      env: {
+        ...process.env,
+        CODEX_BRIDGE_TEST_MODE: '1',
+        CODEX_BRIDGE_BIN: process.execPath,
+        CODEX_BRIDGE_BIN_ARGS_PREFIX: JSON.stringify([fakeCodexPath]),
+      },
+      cancelGraceMs: 40,
+      startRun: () => ({
+        pid: 200004,
+        hasExited: () => false,
+        getProgress: () => ({ events_count: 1, last_event: 'turn.started' }),
+        cancel: async () => {
+          shutdownCancelCalls += 1;
+          return { ok: false, error: 'Access denied' };
+        },
+        donePromise: new Promise((resolve) => {
+          releaseShutdown = resolve;
+        }),
+      }),
+    });
+    const spec4 = {
+      ...validateExecInput(
+        { cwd: workDir, mode: 'read-only', prompt: 'timeout-shutdown', wait_sec: 0.05 },
+        { ...process.env, CODEX_BRIDGE_TEST_MODE: '1' }
+      ),
+      max_runtime_sec: 0.02,
+    };
+    await shutdownRetryManager.startAndWait(spec4);
+    await new Promise((r) => setTimeout(r, 70));
+    await shutdownRetryManager.shutdownAll();
+    const callsAfterShutdown = shutdownCancelCalls;
+    await new Promise((r) => setTimeout(r, 150));
+    assert.equal(shutdownCancelCalls, callsAfterShutdown);
+    releaseShutdown({
+      exitCode: 0,
+      signal: null,
+      spawnError: null,
+      output: '',
+      stderr: '',
+      policyBlocked: false,
+      session_id: null,
+      usage: null,
+      worktree: null,
+      usedExecFallback: false,
+    });
+  } finally {
+    fs.rmSync(workDir, { recursive: true, force: true });
+  }
+});

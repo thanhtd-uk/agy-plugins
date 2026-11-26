@@ -49,6 +49,7 @@ export class JobManager {
     this.cancelGraceMs = cancelGraceMs;
     this.jobs = new Map();
     this.writeLocks = new Map();
+    this.shuttingDown = false;
   }
 
   _countRunning() {
@@ -129,6 +130,7 @@ export class JobManager {
       startedAtMs,
       finishedAtMs: null,
       cancelReason: null,
+      timedOut: false,
       activeCancelToken: null,
       ttlTimer: null,
       run: null,
@@ -152,10 +154,36 @@ export class JobManager {
 
     this.jobs.set(job_id, job);
 
-    job.ttlTimer = setTimeout(() => {
-      if (job.status === 'running') {
-        void this.cancelJob(job_id, 'max_runtime_exceeded').catch(() => {});
+    const maxTimeoutCancelAttempts = 3;
+    const scheduleTimeoutCancel = (attempt = 1) => {
+      if (job.status !== 'running' || this.shuttingDown) {
+        return;
       }
+      job.timedOut = true;
+      if (job.run.hasExited?.()) {
+        return;
+      }
+      void this.cancelJob(job_id, 'max_runtime_exceeded')
+        .then((res) => {
+          if (
+            job.status === 'running' &&
+            !this.shuttingDown &&
+            !job.run.hasExited?.() &&
+            res?.status === 'cancel_failed' &&
+            attempt < maxTimeoutCancelAttempts
+          ) {
+            const retryDelayMs = this.cancelGraceMs ?? (isTestMode(this.env) ? 50 : 5000);
+            job.ttlTimer = setTimeout(() => {
+              scheduleTimeoutCancel(attempt + 1);
+            }, retryDelayMs);
+            job.ttlTimer.unref();
+          }
+        })
+        .catch(() => {});
+    };
+
+    job.ttlTimer = setTimeout(() => {
+      scheduleTimeoutCancel(1);
     }, spec.max_runtime_sec * 1000);
     job.ttlTimer.unref();
 
@@ -187,8 +215,10 @@ export class JobManager {
         finalStatus = 'cancel_failed';
         job.cancelReason = null;
         job.activeCancelToken = null;
+      } else if (job.timedOut || job.cancelReason === 'max_runtime_exceeded') {
+        finalStatus = 'timed_out';
       } else if (job.cancelReason) {
-        finalStatus = job.cancelReason === 'max_runtime_exceeded' ? 'timed_out' : 'cancelled';
+        finalStatus = 'cancelled';
       } else if (res.spawnError || res.exitCode !== 0) {
         finalStatus = 'failed';
       }
@@ -397,8 +427,15 @@ export class JobManager {
 
   /** Cancels all active jobs and drains pending cancellations during server shutdown. */
   async shutdownAll() {
+    this.shuttingDown = true;
     const graceMs = this.cancelGraceMs ?? (isTestMode(this.env) ? 500 : 5000);
     const active = Array.from(this.jobs.values()).filter((j) => j.status === 'running');
+    for (const j of active) {
+      if (j.ttlTimer) {
+        clearTimeout(j.ttlTimer);
+        j.ttlTimer = null;
+      }
+    }
     await Promise.allSettled(active.map((j) => this.cancelJob(j.job_id, 'server_shutdown')));
     const pendingCancels = Array.from(this.jobs.values())
       .map((j) => j.activeCancelPromise)

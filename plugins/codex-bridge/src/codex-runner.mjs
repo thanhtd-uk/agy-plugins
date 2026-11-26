@@ -417,6 +417,7 @@ export function startCodexRun({ binPath, prefixArgs = [], spec, onProgress, env 
     }
   });
 
+  let childExited = false;
   const donePromise = new Promise((resolve) => {
     let finalized = false;
     let exitGraceTimer = null;
@@ -518,11 +519,13 @@ export function startCodexRun({ binPath, prefixArgs = [], spec, onProgress, env 
     };
 
     child.on('error', (err) => {
+      childExited = true;
       spawnError = err;
       finalize(null, null);
     });
 
     child.on('exit', (code, signal) => {
+      childExited = true;
       if (finalized) {
         return;
       }
@@ -537,6 +540,7 @@ export function startCodexRun({ binPath, prefixArgs = [], spec, onProgress, env 
     });
 
     child.on('close', (code, signal) => {
+      childExited = true;
       finalize(code, signal);
     });
   });
@@ -544,13 +548,19 @@ export function startCodexRun({ binPath, prefixArgs = [], spec, onProgress, env 
   return {
     pid: child.pid,
     tmpOutputPath,
+    hasExited: () => childExited,
     getProgress: () => ({
       events_count: state.events_count,
       last_event: state.last_event,
       last_activity_at: state.last_activity_at,
       session_id: state.session_id,
     }),
-    cancel: () => killProcessTree(child.pid, { env, timeoutMs: isTestMode(env) ? 300 : 4000 }),
+    cancel: () => {
+      if (childExited) {
+        return Promise.resolve({ ok: true, method: 'already-exited' });
+      }
+      return killProcessTree(child.pid, { env, timeoutMs: isTestMode(env) ? 300 : 4000 });
+    },
     donePromise,
   };
 }
