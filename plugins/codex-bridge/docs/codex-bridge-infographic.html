@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="vi" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>codex-bridge v0.2.1 — Kiến trúc &amp; Hướng dẫn nhanh</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --card: #111931;
+      --subcard: #17213f;
+      --border: rgba(148, 163, 184, 0.24);
+      --card-border: rgba(148, 163, 184, 0.16);
+      --fg: #f8fafc;
+      --muted: #cbd5e1;
+      --subtle: #94a3b8;
+      --primary: #60a5fa;
+      --primary-fg: #0b1020;
+      --cyan: #22d3ee;
+      --success: #34d399;
+      --purple: #a78bfa;
+      --warning: #fbbf24;
+      --code: #7dd3fc;
+      --term-bg: #070b16;
+      --sans: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      --mono: "Cascadia Code", "Consolas", ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    html[data-theme="light"] {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --subcard: #f1f5f9;
+      --border: rgba(15, 23, 42, 0.15);
+      --card-border: rgba(15, 23, 42, 0.1);
+      --fg: #0f172a;
+      --muted: #334155;
+      --subtle: #64748b;
+      --primary: #2563eb;
+      --primary-fg: #ffffff;
+      --cyan: #0891b2;
+      --success: #059669;
+      --purple: #7c3aed;
+      --warning: #d97706;
+      --code: #0369a1;
+      --term-bg: #e2e8f0;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 20px;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: var(--sans);
+      font-size: 14px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+    code, .mono { font-family: var(--mono); }
+
+    .container { max-width: 1152px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+
+    .bar, .poster {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+    }
+    .bar {
+      padding: 12px 14px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .btn-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .label-muted { font-size: 12px; font-weight: 600; color: var(--muted); margin-right: 4px; }
+
+    button, select {
+      font-family: inherit;
+      font-size: 12px;
+      font-weight: 600;
+      border-radius: 9px;
+      padding: 7px 12px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--fg);
+      cursor: pointer;
+      transition: opacity 150ms ease, border-color 150ms ease, background 150ms ease;
+    }
+    button:hover, select:hover { opacity: 0.9; }
+    button.active {
+      background: var(--primary);
+      color: var(--primary-fg);
+      border-color: var(--primary);
+    }
+    button.primary {
+      background: var(--primary);
+      color: var(--primary-fg);
+      border-color: var(--primary);
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .explain {
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 10px 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); flex-shrink: 0; }
+
+    .poster { padding: 24px; display: flex; flex-direction: column; gap: 20px; border-radius: 24px; }
+
+    header {
+      text-align: center;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--card-border);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+    }
+    .ver-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--muted);
+    }
+    .ver-pill .ver { color: var(--primary); font-family: var(--mono); }
+    .title-row { display: flex; align-items: center; justify-content: center; gap: 12px; }
+    .title-row h1 { margin: 0; font-size: 30px; font-family: var(--mono); letter-spacing: -0.02em; }
+    .subtitle { margin: 0; font-size: 14px; color: var(--muted); }
+    .hero-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 16px;
+      border-radius: 999px;
+      border: 1px solid var(--success);
+      color: var(--success);
+      background: var(--bg);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .flow-grid {
+      display: grid;
+      grid-template-columns: 4fr 3fr 4fr;
+      gap: 16px;
+      align-items: stretch;
+    }
+    .node-card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      transition: border-color 180ms ease, box-shadow 180ms ease, opacity 180ms ease;
+    }
+    .node-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .node-head h2 { margin: 0; font-size: 16px; }
+    .badge {
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .badge-primary { background: var(--primary); color: var(--primary-fg); }
+    .badge-outline { background: var(--card); border: 1px solid var(--border); color: var(--fg); }
+
+    ul.bullets { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; color: var(--muted); font-size: 13px; }
+    ul.bullets li { display: flex; gap: 8px; align-items: flex-start; }
+    ul.bullets .b { color: var(--primary); font-weight: 700; }
+    code { color: var(--code); }
+
+    .solo-note {
+      margin-top: auto;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 7px 10px;
+      border-radius: 9px;
+      border: 1px solid var(--warning);
+      color: var(--warning);
+      background: var(--card);
+      display: none;
+    }
+    .solo-note.show { display: block; }
+
+    .bridge-card { justify-content: center; align-items: center; text-align: center; }
+    .bridge-card h3 { margin: 0; font-size: 16px; }
+    .bridge-meta { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+
+    .tier {
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: 13px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      transition: border-color 180ms ease, box-shadow 180ms ease, opacity 180ms ease;
+    }
+    .tier-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; font-weight: 700; }
+    .tier p { margin: 0; font-size: 12px; color: var(--muted); }
+
+    .pillars { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+    .pillar {
+      background: var(--bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .pillar-title { font-size: 12px; font-weight: 700; }
+    .pillar p { margin: 0; font-size: 12px; color: var(--muted); line-height: 1.55; }
+
+    .slash-box {
+      background: var(--bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .slash-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .slash-pill {
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: 11px;
+      padding: 9px 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      transition: border-color 180ms ease, box-shadow 180ms ease, opacity 180ms ease;
+    }
+    .slash-pill .cmd { font-family: var(--mono); font-weight: 700; flex-shrink: 0; }
+    .slash-pill .desc { color: var(--muted); }
+
+    footer {
+      background: var(--term-bg);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px 16px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 12px;
+    }
+    footer .note { font-weight: 700; color: var(--primary); }
+
+    .dimmed { opacity: 0.42; }
+    .ring-primary { border-color: var(--primary) !important; box-shadow: 0 0 0 1px var(--primary); }
+    .ring-success { border-color: var(--success) !important; box-shadow: 0 0 0 1px var(--success); }
+    .ring-purple { border-color: var(--purple) !important; box-shadow: 0 0 0 1px var(--purple); }
+
+    @media (max-width: 960px) {
+      .flow-grid { grid-template-columns: 1fr; }
+      .pillars { grid-template-columns: repeat(2, 1fr); }
+      .slash-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 560px) {
+      .pillars { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="bar">
+      <div class="btn-group">
+        <span class="label-muted">Chế độ xem luồng chạy:</span>
+        <button data-mode="auto" class="mode-btn active">Tự động (Mặc định)</button>
+        <button data-mode="offload" class="mode-btn mono">/codex-offload</button>
+        <button data-mode="deep" class="mode-btn mono">/codex-deep</button>
+        <button data-mode="off" class="mode-btn mono">/codex-off</button>
+      </div>
+      <div class="btn-group">
+        <select id="themeSelect" aria-label="Chọn giao diện">
+          <option value="dark">Giao diện: Nền tối (Dark)</option>
+          <option value="light">Giao diện: Nền sáng (Light)</option>
+        </select>
+        <button id="copyCmdBtn">Copy lệnh cài</button>
+        <button id="exportPngBtn" class="primary">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          <span>Tải ảnh PNG 1920×1080</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="explain">
+      <span class="dot"></span>
+      <span id="modeExplainText"></span>
+    </div>
+
+    <div class="poster">
+      <header>
+        <div class="ver-pill">
+          <span>ANTIGRAVITY PLUGIN</span>
+          <span>•</span>
+          <span class="ver">v0.2.1</span>
+        </div>
+
+        <div class="title-row">
+          <svg width="40" height="40" viewBox="0 0 128 128" fill="none" aria-hidden="true">
+            <defs>
+              <linearGradient id="cb-bg-ui" x1="12" y1="12" x2="116" y2="116" gradientUnits="userSpaceOnUse">
+                <stop offset="0%" stop-color="#3B82F6"/>
+                <stop offset="52%" stop-color="#6366F1"/>
+                <stop offset="100%" stop-color="#06B6D4"/>
+              </linearGradient>
+            </defs>
+            <rect x="8" y="8" width="112" height="112" rx="28" fill="url(#cb-bg-ui)"/>
+            <rect x="9" y="9" width="110" height="110" rx="27" stroke="#FFFFFF" stroke-opacity="0.24" stroke-width="2"/>
+            <path d="M37 76 C37 36, 91 36, 91 76" stroke="#FFFFFF" stroke-width="10" stroke-linecap="round"/>
+            <path d="M47 76 L81 76" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round"/>
+            <circle cx="37" cy="76" r="10.5" fill="#FFFFFF"/>
+            <circle cx="91" cy="76" r="10.5" fill="#FFFFFF"/>
+            <circle cx="64" cy="46" r="5" fill="#E0F2FE"/>
+          </svg>
+          <h1>codex-bridge</h1>
+        </div>
+
+        <p class="subtitle">
+          Cầu nối đồng đội giữa <strong>Antigravity (Gemini)</strong> &amp; <strong>Codex CLI</strong> cục bộ
+        </p>
+
+        <div class="hero-pill">
+          ✓ Cứ chat bình thường — Tự động phối hợp (không bắt buộc gõ lệnh /)
+        </div>
+      </header>
+
+      <section class="flow-grid">
+        <div id="node-gemini" class="node-card">
+          <div class="node-head">
+            <h2>Antigravity • Gemini</h2>
+            <span class="badge badge-primary">Nhạc trưởng</span>
+          </div>
+          <ul class="bullets">
+            <li><span class="b">•</span><span>Giữ mạch hội thoại &amp; chọn <code>focus_files</code> tối thiểu</span></li>
+            <li><span class="b">•</span><span>Tự quyết định khi nào gọi Codex phản biện / review</span></li>
+            <li><span class="b">•</span><span>Chạy test cục bộ ngoài Windows sandbox &amp; chốt kết quả</span></li>
+          </ul>
+          <div id="gemini-solo-badge" class="solo-note">
+            Đang chạy Solo 100% — Không gọi ra Codex CLI
+          </div>
+        </div>
+
+        <div id="node-bridge" class="node-card bridge-card">
+          <div class="ver-pill">⇄ <strong style="color: var(--fg);">Stdio MCP</strong> ⇄</div>
+          <h3>Local MCP Bridge</h3>
+          <div class="bridge-meta">
+            <div>Zero-dep Node.js &ge; 20</div>
+            <div>Vượt timeout 145s (<code>codex_job</code>)</div>
+            <div>Đóng gói ngữ cảnh gọn (&le; 8.5 KB)</div>
+          </div>
+        </div>
+
+        <div id="node-codex" class="node-card">
+          <div class="node-head">
+            <h2>Codex CLI</h2>
+            <span class="badge badge-outline">Đồng đội độc lập</span>
+          </div>
+
+          <div id="tier-fast" class="tier">
+            <div class="tier-top">
+              <span style="color: var(--success);">FAST • Mặc định</span>
+              <span class="mono">GPT-6.2 Sol (high)</span>
+            </div>
+            <p>Nhanh, nhẹ quota (~1/4 chi phí Astra) — review thường, second-opinion, code &amp; test độc lập.</p>
+          </div>
+
+          <div id="tier-deep" class="tier">
+            <div class="tier-top">
+              <span style="color: var(--purple);">DEEP • Chuyên gia</span>
+              <span class="mono">GPT-6.2 Astra (high/xhigh)</span>
+            </div>
+            <p>Kiến trúc lớn, bug sâu đa file, review rủi ro cao — chọn thẳng ngay từ đầu khi gặp ca khó.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="pillars">
+        <div class="pillar">
+          <div class="pillar-title" style="color: var(--primary);">1. An toàn &amp; Cô lập</div>
+          <p><code>read-only</code> mặc định • <code>worktree</code> tách nhánh duyệt diff • khóa lock chống ghi đè đồng thời.</p>
+        </div>
+        <div class="pillar">
+          <div class="pillar-title" style="color: var(--cyan);">2. Sạch &amp; Bền bỉ</div>
+          <p><code>--ephemeral</code> không rác lịch sử cá nhân • chạy nền &gt;145s • <code>resume</code> giữ đúng model gốc.</p>
+        </div>
+        <div class="pillar">
+          <div class="pillar-title" style="color: var(--success);">3. Độc lập &amp; Tự Fallback</div>
+          <p>Tách bạch khỏi <code>~/.codex/config.toml</code> • Codex chạm trần quota → tự chuyển solo AGY.</p>
+        </div>
+        <div class="pillar">
+          <div class="pillar-title" style="color: var(--purple);">4. Teamwork Win-Win</div>
+          <p>Phản biện giả định 2 chiều • chỉ rõ edge-case • trình bày cả 2 góc nhìn để dev chốt.</p>
+        </div>
+      </section>
+
+      <section class="slash-box">
+        <div class="label-muted" style="font-weight: 500;">
+          Lệnh <code>/</code> tùy chọn (chỉ dùng khi muốn chủ động gạt chế độ nhanh trong phiên hiện tại):
+        </div>
+        <div class="slash-grid">
+          <div id="pill-offload" class="slash-pill">
+            <span class="cmd" style="color: var(--success);">/codex-offload</span>
+            <span class="desc">Xả tải sang Codex linh hoạt fast / deep</span>
+          </div>
+          <div id="pill-deep" class="slash-pill">
+            <span class="cmd" style="color: var(--purple);">/codex-deep</span>
+            <span class="desc">Hội chẩn Astra read-only trước khi sửa</span>
+          </div>
+          <div id="pill-off" class="slash-pill">
+            <span class="cmd" style="color: var(--warning);">/codex-off</span>
+            <span class="desc">Solo 100% AGY trong phiên (tắt Codex)</span>
+          </div>
+        </div>
+      </section>
+
+      <footer>
+        <code>git pull origin main &amp;&amp; npm --prefix plugins/codex-bridge run install:plugin</code>
+        <span class="note">Mở New Conversation để áp dụng</span>
+      </footer>
+    </div>
+  </div>
+
+  <script>
+    const INSTALL_CMD = 'git pull origin main && npm --prefix plugins/codex-bridge run install:plugin';
+
+    const MODE_INFO = {
+      auto: 'Mặc định: Cứ chat bình thường — Gemini giữ mạch chính và tự gọi Sol (fast) cho review/tác vụ thường hoặc Astra (deep) cho kiến trúc & bug sâu.',
+      offload: '/codex-offload: Tiết kiệm quota Gemini — Gemini chỉ lập kế hoạch, chọn focus_files và chạy test; đẩy phần thực thi sang Codex (fast cho việc thường, deep cho ca khó).',
+      deep: '/codex-deep: Hội chẩn ngang hàng (read-only) với GPT-6.2 Astra trước khi sửa file, tổng hợp bảng so sánh 2 góc nhìn để bạn quyết định.',
+      off: '/codex-off: Chế độ Solo 100% AGY — tạm khóa toàn bộ lệnh gọi Codex trong phiên chat hiện tại; sang phiên mới tự trở lại mặc định.'
+    };
+
+    function setMode(mode) {
+      document.getElementById('modeExplainText').textContent = MODE_INFO[mode];
+
+      document.querySelectorAll('.mode-btn').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.mode === mode);
+      });
+
+      const nodeGemini = document.getElementById('node-gemini');
+      const nodeBridge = document.getElementById('node-bridge');
+      const nodeCodex = document.getElementById('node-codex');
+      const tierFast = document.getElementById('tier-fast');
+      const tierDeep = document.getElementById('tier-deep');
+      const soloBadge = document.getElementById('gemini-solo-badge');
+      const pillOffload = document.getElementById('pill-offload');
+      const pillDeep = document.getElementById('pill-deep');
+      const pillOff = document.getElementById('pill-off');
+
+      [nodeGemini, nodeBridge, nodeCodex, tierFast, tierDeep, pillOffload, pillDeep, pillOff].forEach((el) => {
+        el.classList.remove('dimmed', 'ring-primary', 'ring-success', 'ring-purple');
+      });
+      soloBadge.classList.remove('show');
+
+      if (mode === 'auto') {
+        nodeGemini.classList.add('ring-primary');
+        nodeBridge.classList.add('ring-primary');
+        nodeCodex.classList.add('ring-primary');
+      } else if (mode === 'offload') {
+        nodeBridge.classList.add('ring-success');
+        nodeCodex.classList.add('ring-success');
+        tierFast.classList.add('ring-success');
+        tierDeep.classList.add('ring-purple');
+        pillOffload.classList.add('ring-success');
+      } else if (mode === 'deep') {
+        nodeGemini.classList.add('ring-purple');
+        nodeBridge.classList.add('ring-purple');
+        nodeCodex.classList.add('ring-purple');
+        tierDeep.classList.add('ring-purple');
+        tierFast.classList.add('dimmed');
+        pillDeep.classList.add('ring-purple');
+      } else if (mode === 'off') {
+        nodeGemini.classList.add('ring-primary');
+        soloBadge.classList.add('show');
+        nodeBridge.classList.add('dimmed');
+        nodeCodex.classList.add('dimmed');
+        pillOff.classList.add('ring-primary');
+      }
+    }
+
+    document.querySelectorAll('.mode-btn').forEach((btn) => {
+      btn.addEventListener('click', () => setMode(btn.dataset.mode));
+    });
+
+    const themeSelect = document.getElementById('themeSelect');
+    themeSelect.addEventListener('change', () => {
+      document.documentElement.setAttribute('data-theme', themeSelect.value);
+    });
+
+    document.getElementById('copyCmdBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('copyCmdBtn');
+      try {
+        await navigator.clipboard.writeText(INSTALL_CMD);
+        btn.textContent = 'Đã copy!';
+      } catch {
+        btn.textContent = 'Chọn thủ công ở cuối trang';
+      }
+      setTimeout(() => {
+        btn.textContent = 'Copy lệnh cài';
+      }, 1800);
+    });
+
+    function wrapText(ctx, text, x, y, maxWidth, lineHeight) {
+      const words = text.split(' ');
+      let line = '';
+      let curY = y;
+      for (let i = 0; i < words.length; i++) {
+        const testLine = line ? line + ' ' + words[i] : words[i];
+        if (ctx.measureText(testLine).width > maxWidth && line) {
+          ctx.fillText(line, x, curY);
+          line = words[i];
+          curY += lineHeight;
+        } else {
+          line = testLine;
+        }
+      }
+      if (line) ctx.fillText(line, x, curY);
+      return curY + lineHeight;
+    }
+
+    function drawRoundRect(ctx, x, y, w, h, r, fill, stroke, lineWidth = 1.5) {
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, r);
+      if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+      if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lineWidth; ctx.stroke(); }
+    }
+
+    function drawPill(ctx, text, cx, cy, padX, h, font, bg, stroke, fg) {
+      ctx.font = font;
+      const w = ctx.measureText(text).width + padX * 2;
+      drawRoundRect(ctx, cx - w / 2, cy - h / 2, w, h, h / 2, bg, stroke, 1.5);
+      ctx.fillStyle = fg;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(text, cx, cy + 1);
+      return w;
+    }
+
+    function drawBridgeLogo(ctx, x, y, size) {
+      const scale = size / 128;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(scale, scale);
+      const grad = ctx.createLinearGradient(12, 12, 116, 116);
+      grad.addColorStop(0, '#3B82F6');
+      grad.addColorStop(0.52, '#6366F1');
+      grad.addColorStop(1, '#06B6D4');
+      drawRoundRect(ctx, 8, 8, 112, 112, 28, grad, 'rgba(255,255,255,0.26)', 2);
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineCap = 'round';
+      ctx.lineWidth = 10;
+      ctx.beginPath();
+      ctx.moveTo(37, 76);
+      ctx.bezierCurveTo(37, 36, 91, 36, 91, 76);
+      ctx.stroke();
+      ctx.lineWidth = 8;
+      ctx.beginPath();
+      ctx.moveTo(47, 76);
+      ctx.lineTo(81, 76);
+      ctx.stroke();
+      ctx.fillStyle = '#FFFFFF';
+      [37, 91].forEach((cx) => { ctx.beginPath(); ctx.arc(cx, 76, 10.5, 0, Math.PI * 2); ctx.fill(); });
+      ctx.fillStyle = '#E0F2FE';
+      ctx.beginPath();
+      ctx.arc(64, 46, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawBiArrow(ctx, x1, x2, y, color) {
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(x1 + 10, y);
+      ctx.lineTo(x2 - 10, y);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x1, y); ctx.lineTo(x1 + 13, y - 7); ctx.lineTo(x1 + 13, y + 7); ctx.closePath(); ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(x2, y); ctx.lineTo(x2 - 13, y - 7); ctx.lineTo(x2 - 13, y + 7); ctx.closePath(); ctx.fill();
+      ctx.restore();
+    }
+
+    function renderExportCanvas(themeName) {
+      const W = 1920, H = 1080;
+      const canvas = document.createElement('canvas');
+      canvas.width = W;
+      canvas.height = H;
+      const ctx = canvas.getContext('2d');
+      const dark = themeName !== 'light';
+      const P = dark
+        ? {
+            bg: '#0B1020', grid: 'rgba(148, 163, 184, 0.06)', card: '#111931', subCard: '#17213F',
+            border: 'rgba(148, 163, 184, 0.22)', fg: '#F8FAFC', muted: '#CBD5E1', subtle: '#94A3B8',
+            blue: '#60A5FA', cyan: '#22D3EE', purple: '#A78BFA', emerald: '#34D399', amber: '#FBBF24',
+            heroBg: 'rgba(16, 185, 129, 0.14)', heroStroke: 'rgba(52, 211, 153, 0.65)', termBg: '#070B16',
+          }
+        : {
+            bg: '#F8FAFC', grid: 'rgba(15, 23, 42, 0.04)', card: '#FFFFFF', subCard: '#F1F5F9',
+            border: 'rgba(15, 23, 42, 0.14)', fg: '#0F172A', muted: '#334155', subtle: '#64748B',
+            blue: '#2563EB', cyan: '#0891B2', purple: '#7C3AED', emerald: '#059669', amber: '#D97706',
+            heroBg: 'rgba(5, 150, 105, 0.09)', heroStroke: 'rgba(5, 150, 105, 0.55)', termBg: '#E2E8F0',
+          };
+      const SANS = '"Segoe UI", system-ui, -apple-system, sans-serif';
+      const MONO = '"Cascadia Code", "Consolas", monospace';
+
+      ctx.fillStyle = P.bg;
+      ctx.fillRect(0, 0, W, H);
+      ctx.strokeStyle = P.grid;
+      ctx.lineWidth = 1;
+      for (let gx = 0; gx <= W; gx += 48) { ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, H); ctx.stroke(); }
+      for (let gy = 0; gy <= H; gy += 48) { ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(W, gy); ctx.stroke(); }
+
+      if (dark) {
+        const g1 = ctx.createRadialGradient(420, 180, 20, 420, 180, 520);
+        g1.addColorStop(0, 'rgba(59, 130, 246, 0.18)'); g1.addColorStop(1, 'rgba(59, 130, 246, 0)');
+        ctx.fillStyle = g1; ctx.fillRect(0, 0, W, H);
+        const g2 = ctx.createRadialGradient(1480, 320, 20, 1480, 320, 560);
+        g2.addColorStop(0, 'rgba(139, 92, 246, 0.16)'); g2.addColorStop(1, 'rgba(139, 92, 246, 0)');
+        ctx.fillStyle = g2; ctx.fillRect(0, 0, W, H);
+      }
+
+      drawPill(ctx, 'ANTIGRAVITY PLUGIN • v0.2.1', W / 2, 46, 18, 30, `600 15px ${SANS}`, P.card, P.border, P.cyan);
+
+      const titleText = 'codex-bridge';
+      ctx.font = `700 50px ${MONO}`;
+      const titleW = ctx.measureText(titleText).width;
+      const logoSize = 58;
+      const titleStartX = (W - (logoSize + 18 + titleW)) / 2;
+      drawBridgeLogo(ctx, titleStartX, 74, logoSize);
+      ctx.fillStyle = P.fg; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(titleText, titleStartX + logoSize + 18, 105);
+
+      ctx.font = `500 22px ${SANS}`; ctx.fillStyle = P.muted; ctx.textAlign = 'center';
+      ctx.fillText('Cầu nối đồng đội giữa Antigravity (Gemini) & Codex CLI cục bộ', W / 2, 152);
+
+      drawPill(ctx, '✓  Cứ chat bình thường — Tự động phối hợp (không bắt buộc gõ lệnh /)', W / 2, 202, 26, 42, `700 19px ${SANS}`, P.heroBg, P.heroStroke, P.emerald);
+
+      const flowY = 248, flowH = 304, leftX = 64, leftW = 556;
+      drawRoundRect(ctx, leftX, flowY, leftW, flowH, 22, P.card, P.blue, 2);
+      ctx.font = `700 25px ${SANS}`; ctx.fillStyle = P.fg; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText('Antigravity • Gemini', leftX + 28, flowY + 42);
+      drawPill(ctx, 'Nhạc trưởng', leftX + leftW - 92, flowY + 42, 16, 30, `700 14px ${SANS}`, P.blue, P.blue, '#FFFFFF');
+
+      ctx.font = `400 19px ${SANS}`; ctx.fillStyle = P.muted; ctx.textBaseline = 'top';
+      let ly = flowY + 86;
+      [
+        '• Giữ mạch hội thoại & chọn focus_files tối thiểu',
+        '• Tự quyết định khi nào gọi Codex phản biện / review',
+        '• Chạy test cục bộ ngoài Windows sandbox & chốt kết quả',
+      ].forEach((b) => { ly = wrapText(ctx, b, leftX + 28, ly, leftW - 56, 28) + 12; });
+
+      drawBiArrow(ctx, leftX + leftW + 12, 712, flowY + flowH / 2, P.cyan);
+
+      const midX = 724, midW = 368;
+      drawRoundRect(ctx, midX, flowY + 26, midW, flowH - 52, 22, P.subCard, P.cyan, 2);
+      drawBridgeLogo(ctx, midX + midW / 2 - 26, flowY + 48, 52);
+      ctx.font = `700 24px ${SANS}`; ctx.fillStyle = P.fg; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('Local MCP Bridge', midX + midW / 2, flowY + 124);
+      ctx.font = `500 17px ${SANS}`; ctx.fillStyle = P.muted;
+      ctx.fillText('Zero-dep Node.js (Stdio MCP)', midX + midW / 2, flowY + 162);
+      ctx.fillText('Vượt timeout 145s (codex_job)', midX + midW / 2, flowY + 192);
+      ctx.fillText('Đóng gói ngữ cảnh gọn (<= 8.5 KB)', midX + midW / 2, flowY + 222);
+
+      drawBiArrow(ctx, midX + midW + 12, 1184, flowY + flowH / 2, P.purple);
+
+      const rightX = 1196, rightW = 660;
+      drawRoundRect(ctx, rightX, flowY, rightW, flowH, 22, P.card, P.purple, 2);
+      ctx.font = `700 25px ${SANS}`; ctx.fillStyle = P.fg; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText('Codex CLI', rightX + 28, flowY + 42);
+      drawPill(ctx, 'Đồng đội độc lập', rightX + rightW - 110, flowY + 42, 16, 30, `600 14px ${SANS}`, P.subCard, P.border, P.fg);
+
+      drawRoundRect(ctx, rightX + 24, flowY + 76, rightW - 48, 96, 14, P.subCard, P.emerald, 1.5);
+      ctx.font = `700 17px ${SANS}`; ctx.fillStyle = P.emerald; ctx.textAlign = 'left';
+      ctx.fillText('FAST • Mặc định', rightX + 42, flowY + 102);
+      ctx.font = `700 17px ${MONO}`; ctx.fillStyle = P.fg; ctx.textAlign = 'right';
+      ctx.fillText('GPT-6.2 Sol (high)', rightX + rightW - 42, flowY + 102);
+      ctx.font = `400 17px ${SANS}`; ctx.fillStyle = P.muted; ctx.textAlign = 'left';
+      ctx.fillText('Nhanh, nhẹ quota (~1/4 chi phí) — review, code & test thường', rightX + 42, flowY + 138);
+
+      drawRoundRect(ctx, rightX + 24, flowY + 186, rightW - 48, 96, 14, P.subCard, P.purple, 1.5);
+      ctx.font = `700 17px ${SANS}`; ctx.fillStyle = P.purple; ctx.textAlign = 'left';
+      ctx.fillText('DEEP • Chuyên gia', rightX + 42, flowY + 212);
+      ctx.font = `700 17px ${MONO}`; ctx.fillStyle = P.fg; ctx.textAlign = 'right';
+      ctx.fillText('GPT-6.2 Astra (high / xhigh)', rightX + rightW - 42, flowY + 212);
+      ctx.font = `400 17px ${SANS}`; ctx.fillStyle = P.muted; ctx.textAlign = 'left';
+      ctx.fillText('Kiến trúc lớn, bug sâu đa file, review rủi ro cao ngay từ đầu', rightX + 42, flowY + 248);
+
+      const pillars = [
+        { title: '1. An toàn & Cô lập', color: P.blue, body: 'read-only mặc định • worktree tách nhánh duyệt diff • khóa lock chống ghi đè.' },
+        { title: '2. Sạch & Bền bỉ', color: P.cyan, body: '--ephemeral không rác lịch sử • chạy nền >145s • resume giữ đúng model gốc.' },
+        { title: '3. Độc lập & Tự Fallback', color: P.emerald, body: 'Tách bạch ~/.codex/config.toml • Codex chạm trần quota → tự chuyển solo AGY.' },
+        { title: '4. Teamwork Win-Win', color: P.purple, body: 'Phản biện giả định 2 chiều • chỉ rõ edge-case • trình bày 2 góc nhìn để dev chốt.' },
+      ];
+      const gap = 24, pilW = (W - 128 - gap * 3) / 4, pilY = 580, pilH = 198;
+      pillars.forEach((p, idx) => {
+        const px = 64 + idx * (pilW + gap);
+        drawRoundRect(ctx, px, pilY, pilW, pilH, 18, P.card, P.border, 1.5);
+        drawRoundRect(ctx, px + 22, pilY + 18, 44, 4, 2, p.color, null, 0);
+        ctx.font = `700 20px ${SANS}`; ctx.fillStyle = p.color; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+        ctx.fillText(p.title, px + 22, pilY + 34);
+        ctx.font = `400 18px ${SANS}`; ctx.fillStyle = P.muted;
+        wrapText(ctx, p.body, px + 22, pilY + 74, pilW - 44, 28);
+      });
+
+      const slashY = 804, slashH = 124;
+      drawRoundRect(ctx, 64, slashY, W - 128, slashH, 18, P.card, P.border, 1.5);
+      ctx.font = `600 17px ${SANS}`; ctx.fillStyle = P.subtle; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText('Lệnh / tùy chọn (chỉ dùng khi muốn chủ động gạt chế độ nhanh trong phiên):', 88, slashY + 28);
+
+      const slashes = [
+        { cmd: '/codex-offload', desc: 'Xả tải sang Codex linh hoạt fast / deep', color: P.emerald },
+        { cmd: '/codex-deep', desc: 'Hội chẩn Astra read-only trước khi sửa', color: P.purple },
+        { cmd: '/codex-off', desc: 'Solo 100% AGY trong phiên (tắt Codex)', color: P.amber },
+      ];
+      const sw = (W - 128 - 48 - 32) / 3;
+      slashes.forEach((s, idx) => {
+        const sx = 88 + idx * (sw + 16), sy = slashY + 52;
+        drawRoundRect(ctx, sx, sy, sw, 54, 12, P.subCard, P.border, 1);
+        ctx.font = `700 18px ${MONO}`; ctx.fillStyle = s.color; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+        ctx.fillText(s.cmd, sx + 16, sy + 28);
+        const cmdW = ctx.measureText(s.cmd).width;
+        ctx.font = `400 17px ${SANS}`; ctx.fillStyle = P.muted;
+        ctx.fillText('— ' + s.desc, sx + 26 + cmdW, sy + 28);
+      });
+
+      const footY = 954, footH = 76;
+      drawRoundRect(ctx, 64, footY, W - 128, footH, 16, P.termBg, P.border, 1.5);
+      ctx.font = `600 20px ${MONO}`; ctx.fillStyle = P.cyan; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText('$  ' + INSTALL_CMD, 92, footY + footH / 2);
+      ctx.font = `700 18px ${SANS}`; ctx.fillStyle = P.blue; ctx.textAlign = 'right';
+      ctx.fillText('Mở New Conversation để áp dụng', W - 92, footY + footH / 2);
+
+      return canvas;
+    }
+
+    document.getElementById('exportPngBtn').addEventListener('click', () => {
+      const btn = document.getElementById('exportPngBtn');
+      const label = btn.querySelector('span');
+      const themeName = themeSelect.value;
+      const canvas = renderExportCanvas(themeName);
+
+      const triggerDownload = (url, shouldRevoke) => {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `codex-bridge-v0.2.1-${themeName}.png`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        if (shouldRevoke) setTimeout(() => URL.revokeObjectURL(url), 1000);
+      };
+
+      if (canvas.toBlob) {
+        canvas.toBlob((blob) => {
+          if (blob) triggerDownload(URL.createObjectURL(blob), true);
+          else triggerDownload(canvas.toDataURL('image/png'), false);
+        }, 'image/png');
+      } else {
+        triggerDownload(canvas.toDataURL('image/png'), false);
+      }
+
+      const prev = label.textContent;
+      label.textContent = 'Đã tải PNG 1920×1080!';
+      setTimeout(() => { label.textContent = prev; }, 2000);
+    });
+
+    setMode('auto');
+  </script>
+</body>
+</html>

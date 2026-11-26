@@ -2,6 +2,10 @@
 
 Zero-dependency Local Stdio MCP Server (Node.js >= 20, pure ESM) pairing **Antigravity Orchestrator** with your local **Codex CLI** (`codex exec` / `codex exec resume` / `codex exec review`) in a two-tier peer workflow.
 
+![codex-bridge v0.2.1 architecture](docs/codex-bridge-infographic.png)
+
+> Interactive HTML version (offline, mode explorer + 1-click 1920×1080 PNG export): [`docs/codex-bridge-infographic.html`](docs/codex-bridge-infographic.html)
+
 ## Features
 
 - **Two-tier model profiles decoupled from `~/.codex/config.toml`**:
