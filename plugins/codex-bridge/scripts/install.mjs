@@ -10,7 +10,7 @@ const __dirname = path.dirname(__filename);
 const PLUGIN_ROOT = path.resolve(__dirname, '..');
 const DEFAULT_TARGET = path.join(os.homedir(), '.gemini', 'config', 'plugins', 'codex-bridge');
 
-const RUNTIME_ITEMS = ['plugin.json', 'mcp_config.json', 'package.json', 'README.md', 'rules', 'src'];
+const RUNTIME_ITEMS = ['plugin.json', 'mcp_config.json', 'package.json', 'README.md', 'assets', 'rules', 'src'];
 
 function parseArgs(argv) {
   const cmd = argv[0] || 'doctor';
@@ -24,6 +24,14 @@ function parseArgs(argv) {
   return { cmd, target };
 }
 
+export function isBlockingFinding(finding) {
+  if (!finding || typeof finding !== 'object') {
+    return true;
+  }
+  const severity = String(finding.severity || '').toLowerCase();
+  return severity !== 'note' && severity !== 'info';
+}
+
 function runAgyValidate(dirPath) {
   try {
     const out = execFileSync('agy', ['plugin', 'validate', '--strict', dirPath, '--json'], {
@@ -34,13 +42,14 @@ function runAgyValidate(dirPath) {
     });
     const parsed = JSON.parse(out);
     const findings = Array.isArray(parsed.findings) ? parsed.findings : [];
-    return { ok: findings.length === 0, findings, skipped: false };
+    const blocking = findings.filter(isBlockingFinding);
+    return { ok: blocking.length === 0, findings: blocking, allFindings: findings, skipped: false };
   } catch (err) {
     if (err && err.code === 'ENOENT') {
-      return { ok: true, findings: [], skipped: true, reason: 'agy CLI not found on PATH' };
+      return { ok: true, findings: [], allFindings: [], skipped: true, reason: 'agy CLI not found on PATH' };
     }
     const raw = (err.stdout || err.stderr || err.message || '').trim();
-    return { ok: false, findings: [raw], skipped: false };
+    return { ok: false, findings: [raw], allFindings: [raw], skipped: false };
   }
 }
 

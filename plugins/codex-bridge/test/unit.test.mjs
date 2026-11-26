@@ -21,7 +21,7 @@ import {
 import { JobManager, detectPolicyBlockWarning } from '../src/job-manager.mjs';
 import { SessionStore } from '../src/session-store.mjs';
 import { validateCwd, validateExecInput, validateReviewInput } from '../src/validation.mjs';
-import { cmdUninstall, copyRuntimeFiles, validateInstallTarget } from '../scripts/install.mjs';
+import { cmdUninstall, copyRuntimeFiles, isBlockingFinding, validateInstallTarget } from '../scripts/install.mjs';
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FAKE_CODEX_PATH = path.join(PLUGIN_ROOT, 'test', 'fixtures', 'fake-codex.mjs');
@@ -644,6 +644,12 @@ test('validateInstallTarget & copyRuntimeFiles guard against unrelated directori
     const freshTarget = path.join(tmpDir, 'fresh-codex-bridge');
     copyRuntimeFiles(srcRoot, freshTarget);
     assert.ok(fs.existsSync(path.join(freshTarget, 'plugin.json')));
+    assert.ok(fs.existsSync(path.join(freshTarget, 'assets', 'logo.png')));
+    assert.equal(isBlockingFinding({ severity: 'note', message: 'optional hint' }), false);
+    assert.equal(isBlockingFinding({ severity: 'info', message: 'informational' }), false);
+    assert.equal(isBlockingFinding({ severity: 'warning', message: 'warn' }), true);
+    assert.equal(isBlockingFinding({ severity: 'error', message: 'err' }), true);
+    assert.equal(isBlockingFinding('raw cli error'), true);
 
     // Symlinked/junction runtime directory in an existing install must be replaced without pruning target files
     const externalDir = path.join(tmpDir, 'external-dir');

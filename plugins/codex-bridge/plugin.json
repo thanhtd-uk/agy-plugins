@@ -3,6 +3,7 @@
   "displayName": "Codex Bridge",
   "version": "0.1.0",
   "description": "Local Stdio MCP bridge connecting Antigravity Orchestrator with your local Codex CLI for deep analysis, isolated edits, and code reviews.",
+  "logo": "assets/logo.png",
   "author": {
     "name": "cfotel2604",
     "url": "https://github.com/cfotel2604"
